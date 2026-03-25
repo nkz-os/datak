@@ -32,11 +32,19 @@ mqtt:
 
 # Digital Twin / Cloud connection
 digital_twin:
+  # When enabled, DaTaK publishes aggregated readings to the cloud MQTT broker
   enabled: false
-  endpoint: "https://your-twin.example.com/api/v1/data"
-  api_key: "your-api-key-here"
-  timeout_seconds: 10
-  retry_attempts: 3
+  host: "nkz.artotxiki.com"
+  port: 443
+  # Example (from Nekazari wizard):
+  # - Publish JSON: /json/<api_key>/<device_id>/attrs
+  topic: "/json/your-api-key/your-device-id/attrs"
+  # Credentials are typically:
+  # - username: <device_id>
+  # - password: <api_key>
+  username: "your-device-id"
+  password: "your-api-key"
+  entity_type: "AgriSensor"
 
 # CSV Report Generation
 reports:

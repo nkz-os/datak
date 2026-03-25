@@ -22,6 +22,7 @@ from app.services.cloud_sync import cloud_sync
 from app.services.command_listener import command_listener
 from app.services.csv_engine import csv_generator
 from app.services.orchestrator import orchestrator
+from app.services.telemetry_pipeline import telemetry_pipeline
 
 # Configure structured logging
 structlog.configure(
@@ -80,6 +81,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await cloud_sync.start()
     logger.info("Cloud sync started")
 
+    await telemetry_pipeline.start()
+    logger.info("Telemetry pipeline started")
+
     await command_listener.start()
     logger.info("Command listener started")
 
@@ -127,6 +131,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Stop services in reverse order
     await automation_engine.stop()
     await command_listener.stop()
+    await telemetry_pipeline.stop()
     await cloud_sync.stop()
     await csv_generator.stop()
     await buffer_queue.stop()

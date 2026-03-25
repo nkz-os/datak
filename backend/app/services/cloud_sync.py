@@ -11,6 +11,59 @@ import structlog
 from app.config import get_settings
 from app.db.session import async_session_factory
 from app.models.sensor import Sensor
+import re
+import unicodedata
+
+def _slugify(value: str) -> str:
+    """Normalize string to URL-friendly format (e.g., "Sensor 1" -> "sensor_1")."""
+    value = str(value)
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    value = re.sub(r"[^\w\s-]", "", value).strip().lower()
+    return re.sub(r"[-\s]+", "_", value)
+
+
+def _get_sdm_attribute(name: str) -> str:
+    """
+    Smart Auto-Mapper: Infer standard SDM attribute from sensor name.
+    
+    Logic:
+    1. Normalize name (lowercase).
+    2. Check for keywords.
+    3. Fallback: Normalized original name (to support custom sensors).
+    """
+    n = name.lower()
+    
+    # 1. Temperature (airTemperature)
+    if any(k in n for k in ["temp", "t_", "termomet"]):
+        return "airTemperature"
+        
+    # 2. Humidity (relativeHumidity)
+    if any(k in n for k in ["hum", "h_", "rh", "humedad"]):
+        return "relativeHumidity"
+        
+    # 3. Soil Moisture (soilMoisture)
+    if any(k in n for k in ["soil", "tierra", "moist", "suelo"]):
+        return "soilMoisture"
+        
+    # 4. Pressure (atmosphericPressure)
+    if any(k in n for k in ["pres", "baro", "atm"]):
+        return "atmosphericPressure"
+        
+    # 5. Wind Speed (windSpeed)
+    if any(k in n for k in ["wind", "viento", "anemo", "speed", "veloc"]):
+        return "windSpeed"
+        
+    # 6. Solar Radiation (solarRadiation)
+    if any(k in n for k in ["solar", "rad", "sun", "pira", "pyra"]):
+        return "solarRadiation"
+        
+    # 7. Battery (batteryLevel)
+    if any(k in n for k in ["bat", "volt", "bater", "nivel"]):
+        return "batteryLevel"
+    
+    # Fallback option (Requested by user) -> Preserve original name normalized
+    return _slugify(name)
+
 
 logger = structlog.get_logger()
 settings = get_settings()
@@ -38,29 +91,30 @@ class CloudSync:
              return
 
         try:
+            tls_context = None
+            if settings.digital_twin_port in (8883, 443):
+                import ssl
+                tls_context = ssl.create_default_context()
+
             self._client = aiomqtt.Client(
                 hostname=settings.digital_twin_host,
                 port=settings.digital_twin_port,
                 username=settings.digital_twin_username,
                 password=settings.digital_twin_password,
-                # Protocol 443 often implies TLS, aiomqtt handles this if port=8883/443?
-                # Usually requires tls_context if not standard.
-                # Assuming standard config or handled by aiomqtt defaults for now.
-                # If port is 443, it might need tls=True or similar.
-                # aiomqtt tries to detect? No.
-                # Use tls_context if port is 8883 or 443 and not localhost?
+                transport="tcp",
+                timeout=10,
+                tls_context=tls_context,
             )
-            
-            # Simple TLS auto-enable if port matches standard secure ports
-            if settings.digital_twin_port in (8883, 443):
-                import ssl
-                # Create default context
-                self._client.tls_context = ssl.create_default_context()
 
             await self._client.__aenter__()
             self._running = True
             
-            self._log.info("Cloud sync connected", host=settings.digital_twin_host)
+            self._log.info(
+                "Cloud sync connected",
+                host=settings.digital_twin_host,
+                port=settings.digital_twin_port,
+                tls=bool(tls_context),
+            )
             
             # TODO: Subscribe to commands if needed in future
             # await self._client.subscribe(f"{settings.digital_twin_topic}/cmd")
@@ -96,13 +150,14 @@ class CloudSync:
 
         try:
             # Format: Simple JSON { "attribute": value }
-            attr_name = attribute or sensor_name
+            final_attr = attribute or _get_sdm_attribute(sensor_name)
             
             # Ensure safe attribute name (no spaces, etc?) User template had keys like "temp_c"
             # We use what's configured.
             
+            self._log.info("Sent twin update", attr=final_attr, val=value, origin=sensor_name)
             payload = json.dumps({
-                attr_name: value
+                final_attr: value
             })
 
             topic = settings.digital_twin_topic

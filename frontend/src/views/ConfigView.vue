@@ -8,9 +8,11 @@ const loading = ref(false)
 const systemConfig = ref({
   influxdb_retention_days: 30,
   digital_twin_enabled: false,
-  digital_twin_endpoint: '',
-  digital_twin_api_key: '',
-  digital_twin_timeout: 10,
+  digital_twin_host: '',
+  digital_twin_port: 443,
+  digital_twin_topic: '',
+  digital_twin_username: '',
+  digital_twin_password: '',
   digital_twin_entity_type: 'AgriSensor',
   gateway_name: ''
 })

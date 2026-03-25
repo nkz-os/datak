@@ -93,7 +93,7 @@ const connectionFields = {
     { key: 'broker', label: 'Broker Host', type: 'text', default: 'localhost' },
     { key: 'port', label: 'Broker Port', type: 'number', default: 1883 },
     { key: 'topic', label: 'Topic', type: 'text', default: 'sensors/temp1', tooltip: 'MQTT Topic to subscribe to' },
-    { key: 'json_path', label: 'JSON Path', type: 'text', default: '$.value', tooltip: 'JSONPath to extract value (e.g. $.data.temp)' },
+    { key: 'json_path', label: 'JSON Path', type: 'text', default: '', tooltip: 'JSONPath to extract value (e.g. $.data.temp)' },
     { key: 'username', label: 'Username', type: 'text', default: '', tooltip: 'Optional' },
     { key: 'password', label: 'Password', type: 'password', default: '', tooltip: 'Optional' },
   ],
