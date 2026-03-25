@@ -1,9 +1,16 @@
-"""Cloud synchronization and Digital Twin integration via MQTT."""
+"""Cloud synchronization and Digital Twin integration via MQTT.
 
-from datetime import datetime
-from typing import Any
+Northbound FIWARE IoT Agent JSON integration: collects local sensor
+readings and publishes them to a remote MQTT broker using the standard
+FIWARE topic format (/<apikey>/<device_id>/attrs).
+"""
+
 import asyncio
 import json
+import re
+import unicodedata
+from datetime import datetime
+from typing import Any
 
 import aiomqtt
 import structlog
@@ -11,8 +18,14 @@ import structlog
 from app.config import get_settings
 from app.db.session import async_session_factory
 from app.models.sensor import Sensor
-import re
-import unicodedata
+
+logger = structlog.get_logger()
+settings = get_settings()
+
+# Maximum reconnect backoff in seconds (caps exponential growth)
+_MAX_BACKOFF = 60
+_BASE_BACKOFF = 5
+
 
 def _slugify(value: str) -> str:
     """Normalize string to URL-friendly format (e.g., "Sensor 1" -> "sensor_1")."""
@@ -24,74 +37,61 @@ def _slugify(value: str) -> str:
 
 def _get_sdm_attribute(name: str) -> str:
     """
-    Smart Auto-Mapper: Infer standard SDM attribute from sensor name.
-    
-    Logic:
-    1. Normalize name (lowercase).
-    2. Check for keywords.
-    3. Fallback: Normalized original name (to support custom sensors).
+    Smart Auto-Mapper: infer standard FIWARE Smart Data Model attribute
+    from a human-readable sensor name.
+
+    Falls back to a slugified version for custom/unknown sensors.
     """
     n = name.lower()
-    
-    # 1. Temperature (airTemperature)
-    if any(k in n for k in ["temp", "t_", "termomet"]):
-        return "airTemperature"
-        
-    # 2. Humidity (relativeHumidity)
-    if any(k in n for k in ["hum", "h_", "rh", "humedad"]):
-        return "relativeHumidity"
-        
-    # 3. Soil Moisture (soilMoisture)
-    if any(k in n for k in ["soil", "tierra", "moist", "suelo"]):
-        return "soilMoisture"
-        
-    # 4. Pressure (atmosphericPressure)
-    if any(k in n for k in ["pres", "baro", "atm"]):
-        return "atmosphericPressure"
-        
-    # 5. Wind Speed (windSpeed)
-    if any(k in n for k in ["wind", "viento", "anemo", "speed", "veloc"]):
-        return "windSpeed"
-        
-    # 6. Solar Radiation (solarRadiation)
-    if any(k in n for k in ["solar", "rad", "sun", "pira", "pyra"]):
-        return "solarRadiation"
-        
-    # 7. Battery (batteryLevel)
-    if any(k in n for k in ["bat", "volt", "bater", "nivel"]):
-        return "batteryLevel"
-    
-    # Fallback option (Requested by user) -> Preserve original name normalized
+
+    mapping = [
+        (["temp", "t_", "termomet"], "airTemperature"),
+        (["hum", "h_", "rh", "humedad"], "relativeHumidity"),
+        (["soil", "tierra", "moist", "suelo"], "soilMoisture"),
+        (["pres", "baro", "atm"], "atmosphericPressure"),
+        (["wind", "viento", "anemo", "speed", "veloc"], "windSpeed"),
+        (["solar", "rad", "sun", "pira", "pyra"], "solarRadiation"),
+        (["bat", "volt", "bater", "nivel"], "batteryLevel"),
+    ]
+
+    for keywords, attr in mapping:
+        if any(k in n for k in keywords):
+            return attr
+
     return _slugify(name)
-
-
-logger = structlog.get_logger()
-settings = get_settings()
 
 
 class CloudSync:
     """
     Northbound service for Digital Twin integration via MQTT.
+
+    Thread-safety: all public methods are coroutine-safe. Reconnection
+    is serialized via an asyncio.Lock to prevent concurrent stop/start
+    races when multiple publish errors arrive simultaneously.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._log = logger.bind(component="cloud_sync")
         self._client: aiomqtt.Client | None = None
-        self._running = False
-        self._loop_task: asyncio.Task[None] | None = None
+        self._connected = False
+        self._reconnecting = False
+        self._reconnect_lock = asyncio.Lock()
         self._reconnect_attempts = 0
-        self._max_reconnect_attempts = 5
-        self._reconnect_delay = 5  # seconds, doubles each attempt
+
+    @property
+    def is_healthy(self) -> bool:
+        """Expose connection health for /health or metrics endpoints."""
+        return self._connected and self._client is not None
 
     async def start(self) -> None:
-        """Initialize the cloud sync service."""
+        """Connect to the remote MQTT broker."""
         if not settings.digital_twin_enabled:
             self._log.info("Digital Twin integration disabled")
             return
 
         if not settings.digital_twin_host:
-             self._log.warning("Digital Twin enabled but no host configured")
-             return
+            self._log.warning("Digital Twin enabled but no host configured")
+            return
 
         try:
             tls_context = None
@@ -110,7 +110,7 @@ class CloudSync:
             )
 
             await self._client.__aenter__()
-            self._running = True
+            self._connected = True
             self._reconnect_attempts = 0
 
             self._log.info(
@@ -122,11 +122,11 @@ class CloudSync:
 
         except Exception as e:
             self._log.error("Failed to connect to Digital Twin MQTT", error=str(e))
-            self._running = False
+            self._connected = False
 
     async def stop(self) -> None:
-        """Close cloud sync connections."""
-        self._running = False
+        """Disconnect from the remote MQTT broker."""
+        self._connected = False
         if self._client:
             try:
                 await self._client.__aexit__(None, None, None)
@@ -144,61 +144,77 @@ class CloudSync:
         attribute: str | None = None,
     ) -> bool:
         """
-        Send a sensor reading to the Digital Twin.
+        Publish a sensor reading to the Digital Twin via MQTT.
+
+        Returns False (without blocking) if the client is disconnected
+        or reconnecting — the reconnect loop will restore service.
         """
-        if not self._client or not settings.digital_twin_enabled:
+        if not settings.digital_twin_enabled:
             return False
 
+        if not self._connected or self._client is None:
+            return False
+
+        topic = settings.digital_twin_topic
+        if not topic:
+            return False
+
+        final_attr = attribute or _get_sdm_attribute(sensor_name)
+        payload = json.dumps({final_attr: value})
+
         try:
-            # Format: Simple JSON { "attribute": value }
-            final_attr = attribute or _get_sdm_attribute(sensor_name)
-            
-            # Ensure safe attribute name (no spaces, etc?) User template had keys like "temp_c"
-            # We use what's configured.
-            
-            self._log.info("Sent twin update", attr=final_attr, val=value, origin=sensor_name)
-            payload = json.dumps({
-                final_attr: value
-            })
-
-            topic = settings.digital_twin_topic
-            if not topic:
-                self._log.warning("No Digital Twin topic configured")
-                return False
-
             await self._client.publish(topic, payload)
+            self._log.debug("Twin update", attr=final_attr, val=value, origin=sensor_name)
             return True
 
         except Exception as e:
             self._log.error("Cloud publish error", error=str(e))
-            asyncio.create_task(self._try_reconnect())
+            self._schedule_reconnect()
             return False
 
-    async def _try_reconnect(self) -> None:
-        """Attempt to reconnect to the remote MQTT broker with exponential backoff."""
-        if self._reconnect_attempts >= self._max_reconnect_attempts:
-            self._log.error(
-                "Max reconnect attempts reached, giving up",
-                attempts=self._reconnect_attempts,
-            )
-            return
+    def _schedule_reconnect(self) -> None:
+        """Schedule a reconnection attempt if one isn't already running."""
+        if not self._reconnecting:
+            asyncio.create_task(self._reconnect_loop())
 
-        self._reconnect_attempts += 1
-        delay = self._reconnect_delay * (2 ** (self._reconnect_attempts - 1))
-        self._log.info(
-            "Attempting reconnect",
-            attempt=self._reconnect_attempts,
-            delay=delay,
-        )
-        await asyncio.sleep(delay)
+    async def _reconnect_loop(self) -> None:
+        """
+        Single serialized reconnection loop with capped exponential backoff.
 
-        await self.stop()
-        await self.start()
+        Retries indefinitely — an edge gateway must recover autonomously.
+        The lock guarantees only one reconnect loop runs at a time.
+        """
+        async with self._reconnect_lock:
+            if self._reconnecting:
+                return  # another coroutine already handling it
+            self._reconnecting = True
+
+        try:
+            while True:
+                self._reconnect_attempts += 1
+                delay = min(_BASE_BACKOFF * (2 ** (self._reconnect_attempts - 1)), _MAX_BACKOFF)
+
+                self._log.info(
+                    "Reconnect scheduled",
+                    attempt=self._reconnect_attempts,
+                    delay_s=delay,
+                )
+                await asyncio.sleep(delay)
+
+                await self.stop()
+                await self.start()
+
+                if self._connected:
+                    self._log.info(
+                        "Reconnected successfully",
+                        attempt=self._reconnect_attempts,
+                    )
+                    break
+        finally:
+            self._reconnecting = False
 
     async def generate_device_profile(self) -> dict[str, Any]:
-        """
-        Generate a device profile JSON for the Digital Twin.
-        """
+        """Generate a device profile JSON based on active local sensors."""
         try:
             async with async_session_factory() as session:
                 from sqlalchemy import select
@@ -209,22 +225,20 @@ class CloudSync:
                 )
                 sensors = list(result.scalars().all())
 
-            # Build device profile matching user template
             profile = {
                 "name": settings.gateway_name or "DaTaK Gateway",
                 "description": "Auto-generated profile from DaTaK Gateway sensors",
                 "entityType": settings.digital_twin_entity_type or "AgriSensor",
-                "mappings": []
+                "mappings": [],
             }
 
             for sensor in sensors:
-                mapping = {
+                profile["mappings"].append({
                     "incoming_key": sensor.twin_attribute or sensor.name,
                     "target_attribute": sensor.twin_attribute or sensor.name,
                     "type": "Number",
-                    "transformation": "val"
-                }
-                profile["mappings"].append(mapping)
+                    "transformation": "val",
+                })
 
             return profile
 
@@ -232,8 +246,6 @@ class CloudSync:
             self._log.exception("Profile generation failed", error=str(e))
             return {"error": str(e)}
 
-    # Command receiving logic removed for now as it requires complex subscription handling
-    # and wasn't explicitly requested beyond the topic existence.
 
 # Global instance
 cloud_sync = CloudSync()
