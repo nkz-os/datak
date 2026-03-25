@@ -30,20 +30,30 @@ mqtt:
     - "sensors/#"
     - "esp32/#"
 
-# Digital Twin / Cloud connection
+# Digital Twin / Cloud connection (FIWARE IoT Agent JSON over MQTT)
+# ─────────────────────────────────────────────────────────────────
+# DaTaK acts as a northbound gateway: it collects local sensor data and
+# publishes it to a remote FIWARE IoT Agent JSON via MQTT.
+#
+# Setup:
+#   1. Create a device in Nekazari via EntityWizard (or SDM API)
+#   2. Copy the MQTT credentials shown after creation
+#   3. Fill in the values below (or override via DATAK_DIGITAL_TWIN_* env vars)
+#
+# Protocol: FIWARE IoT Agent JSON MQTT binding
+#   - Topic:   /<apikey>/<device_id>/attrs
+#   - Payload: { "attributeName": value }
+#   - The IoT Agent translates this into NGSI-LD entities in Orion-LD
+#
+# For TLS: use port 8883 or 443 (auto-detected by cloud_sync)
+# For plain MQTT: use port 1883 (or NodePort e.g. 31883)
 digital_twin:
-  # When enabled, DaTaK publishes aggregated readings to the cloud MQTT broker
   enabled: false
-  host: "nkz.artotxiki.com"
-  port: 443
-  # Example (from Nekazari wizard):
-  # - Publish JSON: /json/<api_key>/<device_id>/attrs
-  topic: "/json/your-api-key/your-device-id/attrs"
-  # Credentials are typically:
-  # - username: <device_id>
-  # - password: <api_key>
-  username: "your-device-id"
-  password: "your-api-key"
+  host: ""                # Nekazari server IP or hostname
+  port: 1883              # MQTT port (1883/31883 plain, 8883/443 TLS)
+  topic: ""               # /<apikey>/<device_id>/attrs (from wizard)
+  username: ""            # MQTT broker username
+  password: ""            # MQTT broker password (use env var DATAK_DIGITAL_TWIN_PASSWORD)
   entity_type: "AgriSensor"
 
 # CSV Report Generation

@@ -79,6 +79,9 @@ class CloudSync:
         self._client: aiomqtt.Client | None = None
         self._running = False
         self._loop_task: asyncio.Task[None] | None = None
+        self._reconnect_attempts = 0
+        self._max_reconnect_attempts = 5
+        self._reconnect_delay = 5  # seconds, doubles each attempt
 
     async def start(self) -> None:
         """Initialize the cloud sync service."""
@@ -108,16 +111,14 @@ class CloudSync:
 
             await self._client.__aenter__()
             self._running = True
-            
+            self._reconnect_attempts = 0
+
             self._log.info(
                 "Cloud sync connected",
                 host=settings.digital_twin_host,
                 port=settings.digital_twin_port,
                 tls=bool(tls_context),
             )
-            
-            # TODO: Subscribe to commands if needed in future
-            # await self._client.subscribe(f"{settings.digital_twin_topic}/cmd")
 
         except Exception as e:
             self._log.error("Failed to connect to Digital Twin MQTT", error=str(e))
@@ -170,10 +171,29 @@ class CloudSync:
 
         except Exception as e:
             self._log.error("Cloud publish error", error=str(e))
-            # Try to reconnect implicitly? 
-            # aiomqtt client might be disconnected.
-            # We rely on external restart or periodic check, or add logic here.
+            asyncio.create_task(self._try_reconnect())
             return False
+
+    async def _try_reconnect(self) -> None:
+        """Attempt to reconnect to the remote MQTT broker with exponential backoff."""
+        if self._reconnect_attempts >= self._max_reconnect_attempts:
+            self._log.error(
+                "Max reconnect attempts reached, giving up",
+                attempts=self._reconnect_attempts,
+            )
+            return
+
+        self._reconnect_attempts += 1
+        delay = self._reconnect_delay * (2 ** (self._reconnect_attempts - 1))
+        self._log.info(
+            "Attempting reconnect",
+            attempt=self._reconnect_attempts,
+            delay=delay,
+        )
+        await asyncio.sleep(delay)
+
+        await self.stop()
+        await self.start()
 
     async def generate_device_profile(self) -> dict[str, Any]:
         """
