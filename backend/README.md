@@ -93,8 +93,11 @@ influxdb:
 
 digital_twin:
   enabled: true
-  endpoint: "https://your-twin.example.com/api"
-  api_key: "your-key"
+  host: "nkz.artotxiki.com"
+  port: 443
+  topic: "/json/<api_key>/<device_id>/attrs"
+  username: "<device_id>"
+  password: "<api_key>"
 ```
 
 ## License
