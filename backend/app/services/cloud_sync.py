@@ -214,7 +214,12 @@ class CloudSync:
             self._reconnecting = False
 
     async def generate_device_profile(self) -> dict[str, Any]:
-        """Generate a device profile JSON based on active local sensors."""
+        """Generate a device profile JSON compatible with Nekazari SDM Integration.
+
+        The profile uses ``sdm_entity_type`` (not ``entityType``) and resolves
+        each sensor name through ``_get_sdm_attribute`` so that ``incoming_key``
+        matches what DaTaK actually publishes over MQTT.
+        """
         try:
             async with async_session_factory() as session:
                 from sqlalchemy import select
@@ -228,14 +233,19 @@ class CloudSync:
             profile = {
                 "name": settings.gateway_name or "DaTaK Gateway",
                 "description": "Auto-generated profile from DaTaK Gateway sensors",
-                "entityType": settings.digital_twin_entity_type or "AgriSensor",
+                "sdm_entity_type": settings.digital_twin_entity_type or "AgriSensor",
                 "mappings": [],
             }
 
+            seen: set[str] = set()
             for sensor in sensors:
+                sdm_attr = sensor.twin_attribute or _get_sdm_attribute(sensor.name)
+                if sdm_attr in seen:
+                    continue
+                seen.add(sdm_attr)
                 profile["mappings"].append({
-                    "incoming_key": sensor.twin_attribute or sensor.name,
-                    "target_attribute": sensor.twin_attribute or sensor.name,
+                    "incoming_key": sdm_attr,
+                    "target_attribute": sdm_attr,
                     "type": "Number",
                     "transformation": "val",
                 })
