@@ -5,7 +5,7 @@ import pytest
 from app.core.formula import (
     FormulaError,
     evaluate_formula,
-    test_formula,
+    verify_formula,
     validate_formula,
 )
 
@@ -116,13 +116,13 @@ class TestTestFormula:
     """Tests for the formula testing helper."""
 
     def test_valid_formula(self):
-        result = test_formula("val * 2", 10.0)
+        result = verify_formula("val * 2", 10.0)
         assert result["valid"] is True
         assert result["result"] == 20.0
         assert result["error"] is None
 
     def test_invalid_formula(self):
-        result = test_formula("import os", 10.0)
+        result = verify_formula("import os", 10.0)
         assert result["valid"] is False
         assert result["result"] is None
         assert result["error"] is not None

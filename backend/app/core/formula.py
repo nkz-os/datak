@@ -185,7 +185,7 @@ def evaluate_formula(
         raise FormulaError(f"Formula execution failed: {e}") from e
 
 
-def test_formula(formula: str, test_value: float = 100.0) -> dict[str, Any]:
+def verify_formula(formula: str, test_value: float = 100.0) -> dict[str, Any]:
     """
     Test a formula with a sample value.
 

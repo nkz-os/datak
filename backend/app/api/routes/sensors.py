@@ -392,7 +392,7 @@ async def test_formula(
 
     Useful for validating formulas before saving.
     """
-    from app.core.formula import test_formula as do_test
+    from app.core.formula import verify_formula as do_test
 
     result = do_test(body.formula, body.test_value)
     return FormulaTestResponse(**result)
