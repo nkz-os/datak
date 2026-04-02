@@ -59,10 +59,10 @@ class TelemetryPipeline:
 
         # 2) Forward northbound (best-effort)
         ok = await cloud_sync.send_reading(
-            _sensor_id=sensor_id,
+            sensor_id=sensor_id,
             sensor_name=sensor_name,
             value=value,
-            _timestamp=timestamp,
+            timestamp=timestamp,
         )
         if not ok:
             self._log.debug("Northbound publish skipped/failed", sensor_id=sensor_id, sensor_name=sensor_name)
