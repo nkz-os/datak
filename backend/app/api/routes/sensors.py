@@ -106,7 +106,7 @@ class FormulaTestResponse(BaseModel):
 @router.get("", response_model=list[SensorResponse])
 async def list_sensors(
     db: DbSession,
-    user: CurrentUser,
+    _user: CurrentUser,
     active_only: bool = False,
     protocol: str | None = None,
 ) -> list[Sensor]:
@@ -129,7 +129,7 @@ async def list_sensors(
 async def get_sensor(
     sensor_id: int,
     db: DbSession,
-    user: CurrentUser,
+    _user: CurrentUser,
 ) -> Sensor:
     """Get a specific sensor by ID."""
     result = await db.execute(
@@ -171,7 +171,7 @@ async def create_sensor(
         raise HTTPException(
             status_code=400,
             detail=f"Invalid protocol '{body.protocol}'. Must be one of: {valid_protocols}",
-        )
+        ) from None
 
     # Validate formula
     is_valid, error = validate_formula(body.data_formula)
@@ -363,11 +363,11 @@ class SensorWriteRequest(BaseModel):
 async def write_to_sensor(
     sensor_id: int,
     body: SensorWriteRequest,
-    user: OperatorUser,
+    _user: OperatorUser,
 ) -> dict[str, str]:
     """
     Write a value to a sensor (actuator).
-    
+
     Requires OPERATOR or ADMIN role.
     """
     try:
@@ -377,15 +377,15 @@ async def write_to_sensor(
         else:
             raise HTTPException(status_code=500, detail="Write failed (driver returned False)")
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/test-formula", response_model=FormulaTestResponse)
 async def test_formula(
     body: FormulaTestRequest,
-    user: CurrentUser,
+    _user: CurrentUser,
 ) -> FormulaTestResponse:
     """
     Test a formula with a sample value.
@@ -402,7 +402,7 @@ async def test_formula(
 async def restart_sensor(
     sensor_id: int,
     db: DbSession,
-    user: OperatorUser,
+    _user: OperatorUser,
 ) -> dict[str, str]:
     """Restart a sensor's driver."""
     result = await db.execute(
@@ -424,7 +424,7 @@ async def restart_sensor(
 @router.get("/{sensor_id}/status")
 async def get_sensor_status(
     sensor_id: int,
-    user: CurrentUser,
+    _user: CurrentUser,
 ) -> dict[str, Any]:
     """Get real-time status of a sensor driver."""
     status = orchestrator.get_status(sensor_id)

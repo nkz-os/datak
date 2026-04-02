@@ -89,10 +89,10 @@ async def get_prometheus_metrics() -> Response:
 
 
 @router.get("/status")
-async def get_system_status(user: CurrentUser) -> dict[str, Any]:
+async def get_system_status(_user: CurrentUser) -> dict[str, Any]:
     """
     Get comprehensive system status.
-    
+
     Includes:
         - Gateway info
         - Sensor statistics
@@ -136,7 +136,7 @@ async def health_check() -> dict[str, str]:
 
 
 @router.get("/sensors/summary")
-async def get_sensors_summary(user: CurrentUser) -> dict[str, Any]:
+async def get_sensors_summary(_user: CurrentUser) -> dict[str, Any]:
     """Get summary of all sensors with their current values."""
     all_status = orchestrator.get_all_status()
 

@@ -5,7 +5,6 @@ Simulate sensor data for tilt, piranometer, and temperature.
 """
 
 import time
-import json
 import math
 import random
 import argparse

@@ -1,6 +1,7 @@
 """Abstract base class for async protocol drivers."""
 
 import asyncio
+import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -172,10 +173,8 @@ class BaseDriver(ABC):
 
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except (TimeoutError, asyncio.CancelledError):
-                pass
 
         try:
             await self.disconnect()

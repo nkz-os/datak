@@ -45,7 +45,7 @@ class TelemetryPipeline:
         if not self._running:
             return
 
-        driver = orchestrator._drivers.get(sensor_id)  # noqa: SLF001
+        driver = orchestrator._drivers.get(sensor_id)
         sensor_name = driver.sensor_name if driver else f"sensor_{sensor_id}"
 
         # 1) Persist locally (InfluxDB or buffer)

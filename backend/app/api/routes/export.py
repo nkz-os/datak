@@ -22,7 +22,7 @@ class ExportRequest(BaseModel):
 async def export_raw_data(
     body: ExportRequest,
     db: DbSession,
-    user: CurrentUser,
+    _user: CurrentUser,
 ):
     """
     Export raw sensor data as CSV.

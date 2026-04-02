@@ -1,18 +1,20 @@
 """Database models package."""
 
-from app.models.audit import AuditAction, AuditLog
+from app.models.audit import AuditAction, AuditLog, ConfigVersion
 from app.models.base import Base
 from app.models.report import ReportJob
 from app.models.sensor import Sensor, SensorProtocol, SensorReading, SensorStatus
 from app.models.user import User
 
 __all__ = [
+    "AuditAction",
+    "AuditLog",
     "Base",
-    "User",
+    "ConfigVersion",
+    "ReportJob",
     "Sensor",
     "SensorProtocol",
-    "SensorStatus",
     "SensorReading",
-    "AuditLog",
-    "ConfigVersion",
+    "SensorStatus",
+    "User",
 ]

@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     mqtt_password: str | None = None
 
     display_timezone: str = "UTC"
-    
+
     # Digital Twin (MQTT)
     digital_twin_enabled: bool = False
     digital_twin_host: str = ""
@@ -108,7 +108,7 @@ class Settings(BaseSettings):
         path = Path("configs/gateway.yaml")
         if not path.exists():
             path = Path("/app/configs/gateway.yaml")
-        
+
         # Build dict
         config = {
             "gateway": {
@@ -165,7 +165,7 @@ class Settings(BaseSettings):
 
         with open(path, 'w') as f:
             yaml.dump(config, f, default_flow_style=False)
-        
+
         # Clear cache so next get_settings() reloads
         get_settings.cache_clear()
 

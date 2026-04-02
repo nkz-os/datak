@@ -6,6 +6,7 @@ FIWARE topic format (/<apikey>/<device_id>/attrs).
 """
 
 import asyncio
+import contextlib
 import json
 import re
 import unicodedata
@@ -77,6 +78,7 @@ class CloudSync:
         self._reconnecting = False
         self._reconnect_lock = asyncio.Lock()
         self._reconnect_attempts = 0
+        self._reconnect_task: asyncio.Task[None] | None = None
 
     @property
     def is_healthy(self) -> bool:
@@ -128,19 +130,17 @@ class CloudSync:
         """Disconnect from the remote MQTT broker."""
         self._connected = False
         if self._client:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.__aexit__(None, None, None)
-            except Exception:
-                pass
             self._client = None
 
     async def send_reading(
         self,
-        sensor_id: int,
+        _sensor_id: int,
         sensor_name: str,
         value: float,
-        timestamp: datetime,
-        entity_id: str | None = None,
+        _timestamp: datetime,
+        _entity_id: str | None = None,
         attribute: str | None = None,
     ) -> bool:
         """
@@ -172,10 +172,13 @@ class CloudSync:
             self._schedule_reconnect()
             return False
 
-    def _schedule_reconnect(self) -> None:
+    def _trigger_reconnect(self) -> None:
         """Schedule a reconnection attempt if one isn't already running."""
         if not self._reconnecting:
-            asyncio.create_task(self._reconnect_loop())
+            task = asyncio.create_task(self._reconnect_loop())
+            # Store reference to prevent GC
+            self._reconnect_task = task
+
 
     async def _reconnect_loop(self) -> None:
         """

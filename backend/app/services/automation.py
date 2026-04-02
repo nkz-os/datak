@@ -1,5 +1,6 @@
 
 import asyncio
+import contextlib
 import re
 from typing import Any
 
@@ -33,7 +34,7 @@ class AutomationRule:
 class AutomationEngine:
     """
     Evaluates automation rules based on sensor data updates.
-    
+
     Architecture:
     - Subscribes to Orchestrator 'on_processed_value'
     - Maintains a local cache of latest sensor values (by name)
@@ -60,17 +61,21 @@ class AutomationEngine:
         self._running = False
         if self._stats_task:
             self._stats_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._stats_task
-            except asyncio.CancelledError:
-                pass
         self._log.info("Automation engine stopped")
 
     def add_rule(self, rule: AutomationRule) -> None:
         self._rules[rule.id] = rule
         self._log.info("Rule added", rule=rule.name)
 
-    async def _handle_update(self, sensor_id: int, raw: float, value: float, timestamp: Any) -> None:
+    async def _handle_update(
+        self,
+        sensor_id: int,
+        _raw: float,
+        value: float,
+        _timestamp: Any,
+    ) -> None:
         if not self._running:
             return
 
@@ -122,7 +127,7 @@ class AutomationEngine:
 
                 if is_met:
                     self._log.info("Rule triggered", rule=rule.name, condition=rule.condition)
-                    
+
                     # Calculate target value
                     value_to_write = rule.target_value
                     if rule.target_formula:
@@ -155,7 +160,7 @@ class AutomationEngine:
                     texts_to_parse = [rule.condition]
                     if rule.target_formula:
                         texts_to_parse.append(rule.target_formula)
-                    
+
                     for text in texts_to_parse:
                         matches = pattern.findall(text)
                         for match in matches:
@@ -180,7 +185,7 @@ class AutomationEngine:
                         start=start_time,
                         stop="now()"
                     )
-                    
+
                     self._log.debug("InfluxDB stats query", sensor=sensor, window=window, result=stats)
 
                     if stats and func in stats and stats[func] is not None:

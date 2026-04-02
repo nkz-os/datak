@@ -1,6 +1,7 @@
 """Store & Forward buffer for offline resilience."""
 
 import asyncio
+import contextlib
 from datetime import datetime
 from typing import Any
 
@@ -17,11 +18,11 @@ logger = structlog.get_logger()
 class BufferQueue:
     """
     Store & Forward buffer for network resilience.
-    
+
     When the cloud connection is unavailable, readings are stored
     in SQLite. When connection is restored, the queue is flushed
     in FIFO order.
-    
+
     Features:
         - Persistent storage in SQLite
         - FIFO ordering for data integrity
@@ -48,10 +49,8 @@ class BufferQueue:
         self._running = False
         if self._flush_task:
             self._flush_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._flush_task
-            except asyncio.CancelledError:
-                pass
 
         # Final flush attempt
         await self.flush()
@@ -67,7 +66,7 @@ class BufferQueue:
     ) -> bool:
         """
         Add a reading to the buffer.
-        
+
         If cloud is available, writes directly to InfluxDB.
         If not, stores in SQLite for later sync.
         """
@@ -108,7 +107,7 @@ class BufferQueue:
     async def flush(self) -> int:
         """
         Flush buffered readings to the cloud.
-        
+
         Returns:
             Number of readings successfully synced.
         """
@@ -171,10 +170,10 @@ class BufferQueue:
 
         return synced_count
 
-    async def cleanup_synced(self, older_than_hours: int = 24) -> int:
+    async def cleanup_synced(self, _older_than_hours: int = 24) -> int:
         """
         Remove synced readings older than specified hours.
-        
+
         Returns:
             Number of deleted readings.
         """

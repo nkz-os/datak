@@ -1,12 +1,13 @@
 """CSV statistical report generator."""
 
 import asyncio
+import contextlib
 import csv
 import gzip
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 import structlog
@@ -27,7 +28,7 @@ class CSVReportGenerator:
         - Retention policy enforcement
     """
 
-    INTERVAL_MAP = {
+    INTERVAL_MAP: ClassVar[dict[str, timedelta]] = {
         "1min": timedelta(minutes=1),
         "5min": timedelta(minutes=5),
         "10min": timedelta(minutes=10),
@@ -55,10 +56,8 @@ class CSVReportGenerator:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
         self._log.info("CSV Report Generator stopped")
 
     async def generate_report(
@@ -68,11 +67,11 @@ class CSVReportGenerator:
     ) -> Path | None:
         """
         Generate a statistical report for all sensors.
-        
+
         Args:
             interval: Aggregation window (1min, 5min, 10min, 1hour)
             lookback_minutes: Time range to query (default: 2x interval)
-            
+
         Returns:
             Path to generated CSV file, or None if failed.
         """
@@ -101,7 +100,7 @@ class CSVReportGenerator:
 
             # Query statistics for each sensor
             now = datetime.utcnow()
-            start_time = now - timedelta(minutes=lookback_minutes)
+            now - timedelta(minutes=lookback_minutes)
 
             rows: list[dict[str, Any]] = []
 
@@ -155,7 +154,7 @@ class CSVReportGenerator:
     async def generate_daily_summary(self, date: datetime | None = None) -> Path | None:
         """
         Generate a daily summary report with all intervals.
-        
+
         Args:
             date: Date to summarize (default: yesterday)
         """
@@ -224,9 +223,8 @@ class CSVReportGenerator:
                 mtime = datetime.fromtimestamp(file.stat().st_mtime)
                 if mtime < cutoff:
                     gz_path = file.with_suffix(".csv.gz")
-                    with open(file, "rb") as f_in:
-                        with gzip.open(gz_path, "wb") as f_out:
-                            shutil.copyfileobj(f_in, f_out)
+                    with open(file, "rb") as f_in, gzip.open(gz_path, "wb") as f_out:
+                        shutil.copyfileobj(f_in, f_out)
                     file.unlink()
                     compressed += 1
 

@@ -1,5 +1,6 @@
 
 import asyncio
+import contextlib
 import json
 
 import aiomqtt
@@ -14,7 +15,7 @@ settings = get_settings()
 class CommandListener:
     """
     Listens for remote commands via MQTT and executes them on the gateway.
-    
+
     Topic structure: datak/{gateway_name}/cmd/#
     Payload: {"sensor_id": 12, "value": 1.0} or {"sensor_name": "temp", "value": 1.0}
     """
@@ -43,10 +44,8 @@ class CommandListener:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
         self._log.info("Command listener stopped")
 
     async def _listen_loop(self) -> None:

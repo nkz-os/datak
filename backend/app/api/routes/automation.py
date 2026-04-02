@@ -27,7 +27,7 @@ class RuleResponse(BaseModel):
     last_triggered: float
 
 @router.get("/rules", response_model=list[RuleResponse])
-async def get_rules(user: CurrentUser) -> list[RuleResponse]:
+async def get_rules(_user: CurrentUser) -> list[RuleResponse]:
     """Get all automation rules."""
     return [
         RuleResponse(
@@ -44,7 +44,7 @@ async def get_rules(user: CurrentUser) -> list[RuleResponse]:
     ]
 
 @router.post("/rules", response_model=RuleResponse)
-async def create_rule(rule: RuleCreate, user: CurrentUser) -> RuleResponse:
+async def create_rule(rule: RuleCreate, _user: CurrentUser) -> RuleResponse:
     """Create a new automation rule."""
     rule_id = str(uuid.uuid4())
     new_rule = AutomationRule(
@@ -70,7 +70,7 @@ async def create_rule(rule: RuleCreate, user: CurrentUser) -> RuleResponse:
     )
 
 @router.delete("/rules/{rule_id}")
-async def delete_rule(rule_id: str, user: CurrentUser) -> dict:
+async def delete_rule(rule_id: str, _user: CurrentUser) -> dict:
     """Delete an automation rule."""
     if rule_id in automation_engine._rules:
         del automation_engine._rules[rule_id]

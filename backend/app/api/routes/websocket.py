@@ -17,7 +17,7 @@ router = APIRouter(tags=["WebSocket"])
 class ConnectionManager:
     """
     Manages WebSocket connections for real-time updates.
-    
+
     Features:
         - Broadcast to all connected clients
         - Per-sensor subscriptions
@@ -89,7 +89,7 @@ class ConnectionManager:
     ) -> None:
         """
         Send a sensor update to subscribed clients.
-        
+
         Also broadcasts to all clients with a different message type.
         """
         message = {
@@ -167,12 +167,12 @@ manager = ConnectionManager()
 async def websocket_endpoint(websocket: WebSocket):
     """
     Main WebSocket endpoint for real-time updates.
-    
+
     Message format from client:
         {"action": "subscribe", "sensor_id": 1}
         {"action": "unsubscribe", "sensor_id": 1}
         {"action": "ping"}
-    
+
     Message format to client:
         {"type": "sensor_update", "data": {...}}
         {"type": "status_change", "data": {...}}

@@ -1,6 +1,7 @@
 """CANbus driver with DBC file parsing using python-can and cantools."""
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -88,16 +89,14 @@ class CANDriver(BaseDriver):
 
         except Exception as e:
             self._log.error("CAN connection failed", error=str(e))
-            raise ConnectionError(f"Failed to connect to CAN: {e}")
+            raise ConnectionError(f"Failed to connect to CAN: {e}") from e
 
     async def disconnect(self) -> None:
         """Close CAN bus connection."""
         if self._reader_task:
             self._reader_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
-            except asyncio.CancelledError:
-                pass
 
         if self._bus:
             self._bus.shutdown()

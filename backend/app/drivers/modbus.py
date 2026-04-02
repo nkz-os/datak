@@ -91,7 +91,7 @@ class ModbusDriver(BaseDriver):
 
         except Exception as e:
             self._log.error("Modbus connection failed", error=str(e))
-            raise ConnectionError(f"Failed to connect: {e}")
+            raise ConnectionError(f"Failed to connect: {e}") from e
 
     async def disconnect(self) -> None:
         """Close Modbus connection."""
@@ -153,7 +153,7 @@ class ModbusDriver(BaseDriver):
                     return float(result.registers[0])
 
         except ModbusException as e:
-            raise ReadError(f"Modbus read failed: {e}")
+            raise ReadError(f"Modbus read failed: {e}") from e
 
     async def write(self, value: float) -> bool:
         """Write value to Modbus register."""
@@ -184,4 +184,4 @@ class ModbusDriver(BaseDriver):
             return True
 
         except ModbusException as e:
-            raise WriteError(f"Modbus write failed: {e}")
+            raise WriteError(f"Modbus write failed: {e}") from e

@@ -107,7 +107,7 @@ def update_gateway_yaml(nekazari_conf):
     print(f"  - Host: {dt['host']}:{dt['port']}")
     print(f"  - Device ID: {device_id}")
     print(f"  - Topic: {dt['topic']}")
-    print(f"  - Auth: API Key configured")
+    print("  - Auth: API Key configured")
 
     # 4. Save
     # Backup first if exists

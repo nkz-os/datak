@@ -28,7 +28,7 @@ class ConfigExport(BaseModel):
 
 class SystemConfig(BaseModel):
     """System-wide configuration."""
-    
+
     influxdb_retention_days: int
     digital_twin_enabled: bool
     digital_twin_host: str
@@ -41,7 +41,7 @@ class SystemConfig(BaseModel):
 
 
 @router.get("/system")
-async def get_system_config(user: AdminUser) -> SystemConfig:
+async def get_system_config(_user: AdminUser) -> SystemConfig:
     """Get current system configuration."""
     return SystemConfig(
         influxdb_retention_days=settings.influxdb_retention_days,
@@ -59,11 +59,11 @@ async def get_system_config(user: AdminUser) -> SystemConfig:
 @router.put("/system")
 async def update_system_config(
     body: SystemConfig,
-    user: AdminUser,
+    _user: AdminUser,
 ) -> SystemConfig:
     """
     Update system configuration.
-    
+
     Persists changes to configs/gateway.yaml and applies them immediately where possible.
     """
     # Update settings
@@ -82,7 +82,7 @@ async def update_system_config(
     try:
         settings.save_to_yaml()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save configuration: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save configuration: {e}") from e
 
     # Apply InfluxDB retention
     from app.db.influx import influx_client
@@ -106,10 +106,10 @@ class ConfigImport(BaseModel):
 
 
 @router.get("/device-profile")
-async def get_device_profile(user: CurrentUser) -> dict[str, Any]:
+async def get_device_profile(_user: CurrentUser) -> dict[str, Any]:
     """
     Generate and return the device profile JSON.
-    
+
     This can be used to configure the Digital Twin platform.
     """
     profile = await cloud_sync.generate_device_profile()
@@ -117,7 +117,7 @@ async def get_device_profile(user: CurrentUser) -> dict[str, Any]:
 
 
 @router.get("/device-profile/download")
-async def download_device_profile(user: CurrentUser) -> JSONResponse:
+async def download_device_profile(_user: CurrentUser) -> JSONResponse:
     """Download the device profile as a JSON file."""
     profile = await cloud_sync.generate_device_profile()
 
@@ -134,12 +134,12 @@ async def download_device_profile(user: CurrentUser) -> JSONResponse:
 @router.get("/export")
 async def export_configuration(
     db: DbSession,
-    user: AdminUser,
+    _user: AdminUser,
     include_credentials: bool = False,
 ) -> dict[str, Any]:
     """
     Export the complete gateway configuration.
-    
+
     Requires ADMIN role.
     """
     # Get all sensors
@@ -192,7 +192,7 @@ async def import_configuration(
 ) -> dict[str, Any]:
     """
     Import a configuration (creates new sensors, updates existing).
-    
+
     Requires ADMIN role.
     """
     config = body.config
@@ -269,7 +269,7 @@ async def import_configuration(
 @router.get("/versions")
 async def list_config_versions(
     db: DbSession,
-    user: AdminUser,
+    _user: AdminUser,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """List configuration version history."""
@@ -299,7 +299,7 @@ async def rollback_configuration(
 ) -> dict[str, Any]:
     """
     Rollback to a previous configuration version.
-    
+
     Requires ADMIN role.
     """
     result = await db.execute(
@@ -325,7 +325,7 @@ async def rollback_configuration(
 
 @router.get("/reports")
 async def list_reports(
-    user: CurrentUser,
+    _user: CurrentUser,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """List available CSV report files."""
@@ -335,7 +335,7 @@ async def list_reports(
 @router.get("/reports/{filename}")
 async def download_report(
     filename: str,
-    user: CurrentUser,
+    _user: CurrentUser,
 ) -> FileResponse:
     """Download a specific CSV report file."""
     filepath = settings.reports_output_dir / filename
@@ -347,7 +347,7 @@ async def download_report(
     try:
         filepath.resolve().relative_to(settings.reports_output_dir.resolve())
     except ValueError:
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=403, detail="Access denied") from None
 
     return FileResponse(
         path=filepath,
@@ -357,13 +357,13 @@ async def download_report(
 
 
 @router.get("/buffer/status")
-async def get_buffer_status(user: CurrentUser) -> dict[str, Any]:
+async def get_buffer_status(_user: CurrentUser) -> dict[str, Any]:
     """Get the current Store & Forward buffer status."""
     return await buffer_queue.get_queue_stats()
 
 
 @router.post("/buffer/flush")
-async def flush_buffer(user: AdminUser) -> dict[str, Any]:
+async def flush_buffer(_user: AdminUser) -> dict[str, Any]:
     """Manually trigger a buffer flush."""
     synced = await buffer_queue.flush()
     return {"synced": synced}

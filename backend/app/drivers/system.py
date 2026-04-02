@@ -10,7 +10,7 @@ from app.drivers.base import BaseDriver, ReadError
 class SystemDriver(BaseDriver):
     """
     Driver for reading system metrics (CPU, Memory, Disk, Temp).
-    
+
     Configuration example:
     {
         "metric": "cpu_percent" | "memory_percent" | "disk_usage" | "temperature",
@@ -59,7 +59,7 @@ class SystemDriver(BaseDriver):
                 raise ReadError(f"Unknown system metric: {metric}")
 
         except Exception as e:
-            raise ReadError(f"Failed to read system metric {metric}: {e}")
+            raise ReadError(f"Failed to read system metric {metric}: {e}") from e
 
     def _read_temperature(self) -> float:
         """
@@ -90,10 +90,8 @@ class SystemDriver(BaseDriver):
         # Default fallback: try to find CPU temp
         # Common names: coretemp, cpu_thermal, k10temp
         for name in ["coretemp", "cpu_thermal", "k10temp", "acpitz"]:
-            if name in temps:
-                # Return first sensor of this group
-                if temps[name]:
-                    return temps[name][0].current
+            if temps.get(name):
+                return temps[name][0].current
 
         # Fallback: return the very first sensor found
         first_group = next(iter(temps.values()))

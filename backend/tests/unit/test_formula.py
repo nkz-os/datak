@@ -19,11 +19,11 @@ class TestValidateFormula:
         assert error is None
 
     def test_valid_math_formula(self):
-        is_valid, error = validate_formula("sqrt(val) + 10")
+        is_valid, _error = validate_formula("sqrt(val) + 10")
         assert is_valid is True
 
     def test_valid_complex_formula(self):
-        is_valid, error = validate_formula("(val * 0.1 + 10) / 2")
+        is_valid, _error = validate_formula("(val * 0.1 + 10) / 2")
         assert is_valid is True
 
     def test_empty_formula_invalid(self):
@@ -37,15 +37,15 @@ class TestValidateFormula:
         assert "Forbidden" in error
 
     def test_os_blocked(self):
-        is_valid, error = validate_formula("os.system('ls')")
+        is_valid, _error = validate_formula("os.system('ls')")
         assert is_valid is False
 
     def test_dunder_blocked(self):
-        is_valid, error = validate_formula("val.__class__")
+        is_valid, _error = validate_formula("val.__class__")
         assert is_valid is False
 
     def test_exec_blocked(self):
-        is_valid, error = validate_formula("exec('print(1)')")
+        is_valid, _error = validate_formula("exec('print(1)')")
         assert is_valid is False
 
     def test_syntax_error(self):

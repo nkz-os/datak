@@ -1,6 +1,7 @@
 """MQTT async driver using aiomqtt."""
 
 import asyncio
+import contextlib
 import json
 from typing import Any
 
@@ -73,22 +74,18 @@ class MQTTDriver(BaseDriver):
 
         except Exception as e:
             self._log.error("MQTT connection failed", error=str(e))
-            raise ConnectionError(f"Failed to connect to MQTT: {e}")
+            raise ConnectionError(f"Failed to connect to MQTT: {e}") from e
 
     async def disconnect(self) -> None:
         """Disconnect from MQTT broker."""
         if self._subscriber_task:
             self._subscriber_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._subscriber_task
-            except asyncio.CancelledError:
-                pass
 
         if self._client:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.__aexit__(None, None, None)
-            except Exception:
-                pass
             self._client = None
 
     async def read(self) -> float:
@@ -162,7 +159,7 @@ class MQTTDriver(BaseDriver):
     async def write(self, value: float) -> bool:
         """
         Publish value to the command topic.
-        
+
         Default command topic is {topic}/set unless 'command_topic' is configured.
         """
         if not self._client:

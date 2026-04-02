@@ -12,7 +12,7 @@ router = APIRouter(prefix="/report-jobs", tags=["Report Jobs"])
 @router.get("", response_model=list[ReportJobResponse])
 async def list_jobs(
     db: DbSession,
-    user: CurrentUser,
+    _user: CurrentUser,
 ) -> list[ReportJob]:
     """List all statistical report jobs."""
     query = select(ReportJob).order_by(ReportJob.name)
@@ -23,7 +23,7 @@ async def list_jobs(
 async def create_job(
     body: ReportJobCreate,
     db: DbSession,
-    user: CurrentUser,
+    _user: CurrentUser,
 ) -> ReportJob:
     """Create a new report job."""
     # Check duplicate name
@@ -52,7 +52,7 @@ async def create_job(
 async def get_job(
     job_id: int,
     db: DbSession,
-    user: CurrentUser,
+    _user: CurrentUser,
 ) -> ReportJob:
     """Get job details."""
     job = await db.get(ReportJob, job_id)
@@ -65,7 +65,7 @@ async def update_job(
     job_id: int,
     body: ReportJobUpdate,
     db: DbSession,
-    user: CurrentUser,
+    _user: CurrentUser,
 ) -> ReportJob:
     """Update a report job."""
     job = await db.get(ReportJob, job_id)
@@ -88,7 +88,7 @@ async def update_job(
 async def delete_job(
     job_id: int,
     db: DbSession,
-    user: CurrentUser,
+    _user: CurrentUser,
 ) -> None:
     """Delete a report job."""
     job = await db.get(ReportJob, job_id)

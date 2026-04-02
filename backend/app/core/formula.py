@@ -178,11 +178,11 @@ def evaluate_formula(
     except FormulaError:
         raise
     except (TypeError, ValueError) as e:
-        raise FormulaError(f"Type error in formula: {e}")
-    except ZeroDivisionError:
-        raise FormulaError("Division by zero")
+        raise FormulaError(f"Type error in formula: {e}") from e
+    except ZeroDivisionError as e:
+        raise FormulaError("Division by zero") from e
     except Exception as e:
-        raise FormulaError(f"Formula execution failed: {e}")
+        raise FormulaError(f"Formula execution failed: {e}") from e
 
 
 def test_formula(formula: str, test_value: float = 100.0) -> dict[str, Any]:

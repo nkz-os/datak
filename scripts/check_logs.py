@@ -1,5 +1,4 @@
 import paramiko
-import sys
 
 HOST = "100.95.129.22"
 USER = "g"

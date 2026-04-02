@@ -7,23 +7,23 @@ available for display in the Dashboard and storage in InfluxDB.
 from datetime import datetime
 from typing import Any
 
-from app.drivers.base import BaseDriver
 from app.db.influx import influx_client
 from app.db.session import async_session_factory
+from app.drivers.base import BaseDriver
 from app.models.sensor import Sensor
 
 
 class VirtualOutputDriver(BaseDriver):
     """
     Driver for virtual output sensors used as automation rule targets.
-    
+
     This driver:
     - Does not poll external sources (read returns last written value)
     - Accepts writes from automation engine
     - Stores value in memory and writes directly to InfluxDB
     - Updates SQLite sensor record for UI visibility
     - Does NOT trigger automation callbacks to prevent recursion
-    
+
     Configuration:
         {
             "initial_value": 0  # Optional default value
@@ -57,7 +57,7 @@ class VirtualOutputDriver(BaseDriver):
     async def write(self, value: float) -> bool:
         """
         Store the value and write directly to InfluxDB.
-        
+
         This is called by the automation engine when a rule triggers.
         We write directly to InfluxDB to avoid triggering automation
         callbacks which would cause infinite recursion.
@@ -69,7 +69,7 @@ class VirtualOutputDriver(BaseDriver):
             sensor_name=self.sensor_name,
             value=value,
         )
-        
+
         # Write to InfluxDB for time-series history
         try:
             await influx_client.write_sensor_value(
@@ -81,7 +81,7 @@ class VirtualOutputDriver(BaseDriver):
             )
         except Exception as e:
             self._log.warning("Failed to write to InfluxDB", error=str(e))
-        
+
         # Update SQLite sensor record for UI/API visibility
         try:
             async with async_session_factory() as session:
@@ -91,10 +91,10 @@ class VirtualOutputDriver(BaseDriver):
                     await session.commit()
         except Exception as e:
             self._log.warning("Failed to update sensor in DB", error=str(e))
-        
+
         # Update in-memory last_value
         self._last_value = value
-        
+
         return True
 
     async def _poll_loop(self) -> None:
@@ -103,7 +103,7 @@ class VirtualOutputDriver(BaseDriver):
         They only update when written to by automation.
         """
         import asyncio
-        
+
         # Just keep the driver "running" but don't poll
         while self._running:
             await asyncio.sleep(1)

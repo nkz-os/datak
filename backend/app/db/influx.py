@@ -17,7 +17,7 @@ settings = get_settings()
 class InfluxDBClient:
     """
     Async InfluxDB client for storing sensor time-series data.
-    
+
     Features:
         - Batch writes for performance
         - Automatic retry on failure
@@ -73,7 +73,7 @@ class InfluxDBClient:
     ) -> bool:
         """
         Write a sensor reading to InfluxDB.
-        
+
         Args:
             sensor_id: Unique sensor identifier
             sensor_name: Human-readable sensor name
@@ -121,10 +121,10 @@ class InfluxDBClient:
     ) -> int:
         """
         Write multiple readings in a batch.
-        
+
         Args:
             readings: List of dicts with keys: sensor_id, sensor_name, value, raw_value, timestamp
-            
+
         Returns:
             Number of successfully written points
         """
@@ -169,14 +169,14 @@ class InfluxDBClient:
     ) -> list[dict[str, Any]]:
         """
         Query sensor data for a time range.
-        
+
         Args:
             sensor_name: Name of sensor to query
             start: Start time (Flux format: -1h, -7d, 2024-01-01T00:00:00Z)
             stop: End time
             aggregation: Optional aggregation: mean, min, max, sum
             window: Window for aggregation (1m, 5m, 1h)
-            
+
         Returns:
             List of data points
         """
@@ -230,7 +230,7 @@ class InfluxDBClient:
     ) -> dict[str, float | None]:
         """
         Calculate statistics for a sensor over a time range.
-        
+
         Returns:
             Dict with mean, min, max, stddev, count
         """
@@ -284,7 +284,7 @@ class InfluxDBClient:
     ) -> str:
         """
         Query and pivot data for export to CSV.
-        
+
         Returns:
             CSV string
         """
@@ -319,10 +319,10 @@ class InfluxDBClient:
             import io
 
             output = io.StringIO()
-            
+
             # Fields: time, sensor1, sensor2...
-            fieldnames = ["time"] + sorted(sensor_names)
-            
+            fieldnames = ["time", *sorted(sensor_names)]
+
             writer = csv.DictWriter(output, fieldnames=fieldnames)
             writer.writeheader()
 
@@ -334,7 +334,7 @@ class InfluxDBClient:
                         val = record.values.get(sensor)
                         if val is not None:
                             row[sensor] = val
-                    
+
                     writer.writerow(row)
 
             return output.getvalue()
@@ -351,7 +351,7 @@ class InfluxDBClient:
         """Update the retention policy for the sensor bucket."""
         if not self._client:
             return False
-            
+
         try:
             buckets_api = self._client.buckets_api()
             # Find bucket
@@ -359,24 +359,24 @@ class InfluxDBClient:
             if not bucket:
                 self._log.error("Bucket not found", bucket=settings.influxdb_bucket)
                 return False
-            
+
             # Update retention
-            # InfluxDB Client expects BucketRetentionRules objects usually, 
-            # but sometimes accepts dicts depending on version. 
+            # InfluxDB Client expects BucketRetentionRules objects usually,
+            # but sometimes accepts dicts depending on version.
             # Let's import BucketRetentionRules to be safe if available, or just pass the object update.
             # Actually, update_bucket takes a Bucket object.
-            
+
             from influxdb_client.domain.bucket_retention_rules import BucketRetentionRules
-            
+
             # 0 means infinite retention
             seconds = days * 86400 if days > 0 else 0
-            
+
             bucket.retention_rules = [BucketRetentionRules(type="expire", every_seconds=seconds)]
-            
+
             await buckets_api.update_bucket(bucket)
             self._log.info("Updated retention policy", days=days)
             return True
-            
+
         except Exception as e:
             self._log.error("Failed to update retention", error=str(e))
             return False
