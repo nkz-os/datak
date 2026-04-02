@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 

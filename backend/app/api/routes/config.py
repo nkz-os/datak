@@ -148,11 +148,12 @@ async def export_configuration(
     )
     sensors = list(result.scalars().all())
 
-    config = {
+    sensors_list: list[dict[str, Any]] = []
+    config: dict[str, Any] = {
         "version": "1.0",
         "exported_at": datetime.utcnow().isoformat(),
         "gateway_name": settings.gateway_name,
-        "sensors": [],
+        "sensors": sensors_list,
     }
 
     for sensor in sensors:
@@ -178,7 +179,7 @@ async def export_configuration(
             params.pop("api_key", None)
             sensor_config["connection_params"] = params
 
-        config["sensors"].append(sensor_config)
+        sensors_list.append(sensor_config)
 
     return config
 

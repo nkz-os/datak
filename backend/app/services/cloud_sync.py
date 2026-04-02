@@ -170,7 +170,7 @@ class CloudSync:
 
         except Exception as e:
             self._log.error("Cloud publish error", error=str(e))
-            self._schedule_reconnect()
+            self._trigger_reconnect()
             return False
 
     def _trigger_reconnect(self) -> None:
@@ -234,11 +234,12 @@ class CloudSync:
                 )
                 sensors = list(result.scalars().all())
 
-            profile = {
+            mappings: list[dict[str, Any]] = []
+            profile: dict[str, Any] = {
                 "name": settings.gateway_name or "DaTaK Gateway",
                 "description": "Auto-generated profile from DaTaK Gateway sensors",
                 "sdm_entity_type": settings.digital_twin_entity_type or "AgriSensor",
-                "mappings": [],
+                "mappings": mappings,
             }
 
             seen: set[str] = set()
@@ -247,7 +248,7 @@ class CloudSync:
                 if sdm_attr in seen:
                     continue
                 seen.add(sdm_attr)
-                profile["mappings"].append({
+                mappings.append({
                     "incoming_key": sdm_attr,
                     "target_attribute": sdm_attr,
                     "type": "Number",
