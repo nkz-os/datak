@@ -50,7 +50,7 @@ def _get_sdm_attribute(name: str) -> str:
         (["soil", "tierra", "moist", "suelo"], "soilMoisture"),
         (["pres", "baro", "atm"], "atmosphericPressure"),
         (["wind", "viento", "anemo", "speed", "veloc"], "windSpeed"),
-        (["solar", "rad", "sun", "pira", "pyra"], "solarRadiation"),
+        (["solar", "rad", "sun", "pira", "pyra", "insol"], "solarRadiation"),
         (["bat", "volt", "bater", "nivel"], "batteryLevel"),
     ]
 
