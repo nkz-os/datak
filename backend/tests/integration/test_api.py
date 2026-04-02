@@ -21,7 +21,7 @@ class TestHealthEndpoint:
 class TestAuthEndpoints:
     """Tests for authentication endpoints."""
 
-    async def test_login_success(self, async_client: AsyncClient, test_user):
+    async def test_login_success(self, async_client: AsyncClient, _test_user):
         response = await async_client.post(
             "/api/auth/login",
             json={"username": "testuser", "password": "testpassword"},
@@ -31,7 +31,7 @@ class TestAuthEndpoints:
         assert "access_token" in data
         assert data["token_type"] == "bearer"
 
-    async def test_login_invalid_password(self, async_client: AsyncClient, test_user):
+    async def test_login_invalid_password(self, async_client: AsyncClient, _test_user):
         response = await async_client.post(
             "/api/auth/login",
             json={"username": "testuser", "password": "wrongpassword"},

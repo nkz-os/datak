@@ -137,11 +137,11 @@ class CloudSync:
 
     async def send_reading(
         self,
-        sensor_id: int,
+        _sensor_id: int,
         sensor_name: str,
         value: float,
-        timestamp: datetime,
-        entity_id: str | None = None,
+        _timestamp: datetime,
+        _entity_id: str | None = None,
         attribute: str | None = None,
     ) -> bool:
         """

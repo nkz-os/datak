@@ -5,8 +5,8 @@ import pytest
 from app.core.formula import (
     FormulaError,
     evaluate_formula,
-    verify_formula,
     validate_formula,
+    verify_formula,
 )
 
 
