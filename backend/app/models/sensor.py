@@ -1,7 +1,7 @@
 """Sensor model for device configuration and status tracking."""
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import JSON, Float, Index, Integer, String, Text
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin
 
 
-class SensorProtocol(str, Enum):
+class SensorProtocol(StrEnum):
     """Supported communication protocols."""
 
     MODBUS_TCP = "MODBUS_TCP"
@@ -22,7 +22,7 @@ class SensorProtocol(str, Enum):
     VIRTUAL_OUTPUT = "VIRTUAL_OUTPUT"  # For automation rule outputs
 
 
-class SensorStatus(str, Enum):
+class SensorStatus(StrEnum):
     """Sensor connection status."""
 
     UNKNOWN = "UNKNOWN"
