@@ -53,6 +53,7 @@ def _get_sdm_attribute(name: str) -> str:
         (["wind", "viento", "anemo", "speed", "veloc"], "windSpeed"),
         (["solar", "rad", "sun", "pira", "pyra", "insol"], "solarRadiation"),
         (["bat", "volt", "bater", "nivel"], "batteryLevel"),
+        (["tilt", "inclin", "angle", "panel_incl"], "panelInclination"),
     ]
 
     for keywords, attr in mapping:
