@@ -11,20 +11,31 @@ from app.core.security import decode_token, validate_role
 from app.db.session import get_db
 from app.models.user import User
 
-# Bearer token security scheme
-security = HTTPBearer()
+# auto_error is off so the missing-credentials case is answered here, with the
+# same status and challenge as an invalid one. Left on, the framework answers a
+# missing Authorization header with 403, which says "you may not" about a caller
+# that has not said who it is -- and a client cannot tell from it that logging in
+# would help.
+security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
     """
     Dependency to get the current authenticated user.
 
     Validates JWT token and returns User model.
-    Raises 401 if token is invalid or user not found.
+    Raises 401 if credentials are absent, invalid, or the user is unknown.
     """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     token_data = decode_token(credentials.credentials)
 
     if not token_data:
