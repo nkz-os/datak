@@ -258,15 +258,6 @@ async def on_sensor_value(
     """Callback for orchestrator to send updates via WebSocket."""
     status = orchestrator.get_status(sensor_id)
 
-    payload: dict[str, Any] = {
-        "sensor_id": sensor_id,
-        "sensor_name": f"sensor_{sensor_id}",
-        "value": processed_value,
-        "raw_value": raw_value,
-        "status": "ONLINE" if status.get("connected") else "OFFLINE",
-        "timestamp": timestamp.isoformat(),
-    }
-
     await manager.send_sensor_update(
         sensor_id=sensor_id,
         sensor_name=str(register_ctx.get("name")) if register_ctx else f"sensor_{sensor_id}",

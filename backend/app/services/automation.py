@@ -86,11 +86,11 @@ class AutomationEngine:
         if not driver:
             return
 
-        sensor_name = (
-            register_ctx.get("name")
-            if register_ctx and register_ctx.get("name")
-            else driver.sensor_name
-        )
+        # Narrowed in two steps and named: the dict lookup yields Any | None,
+        # which a conditional expression cannot narrow to the str this keys a
+        # dict with.
+        ctx_name = register_ctx.get("name") if register_ctx else None
+        sensor_name: str = str(ctx_name) if ctx_name else driver.sensor_name
         self._sensor_values[sensor_name] = value
 
         # Evaluate rules
