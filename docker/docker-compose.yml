@@ -12,8 +12,8 @@ services:
     environment:
       - DOCKER_INFLUXDB_INIT_MODE=setup
       - DOCKER_INFLUXDB_INIT_USERNAME=admin
-      # Required: compose refuses to start rather than fall back to a known
-      # value. This file is public; a default here is a default everywhere.
+      # Required: compose refuses to start rather than fall back to a value
+      # baked into the file, which would be the same for every install.
       - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_ADMIN_PASSWORD:?set it in docker/.env}
       - DOCKER_INFLUXDB_INIT_ORG=datak
       - DOCKER_INFLUXDB_INIT_BUCKET=sensors
