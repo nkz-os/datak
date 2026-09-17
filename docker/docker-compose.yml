@@ -12,10 +12,12 @@ services:
     environment:
       - DOCKER_INFLUXDB_INIT_MODE=setup
       - DOCKER_INFLUXDB_INIT_USERNAME=admin
-      - DOCKER_INFLUXDB_INIT_PASSWORD=datakadmin123
+      # Required: compose refuses to start rather than fall back to a value
+      # baked into the file, which would be the same for every install.
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_ADMIN_PASSWORD:?set it in docker/.env}
       - DOCKER_INFLUXDB_INIT_ORG=datak
       - DOCKER_INFLUXDB_INIT_BUCKET=sensors
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=datak-dev-token
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_ADMIN_TOKEN:?set it in docker/.env}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "influx", "ping"]
@@ -63,7 +65,7 @@ services:
       - grafana_data:/var/lib/grafana
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=datakadmin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set it in docker/.env}
       - GF_USERS_ALLOW_SIGN_UP=false
     depends_on:
       - prometheus
