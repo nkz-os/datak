@@ -59,6 +59,23 @@ class TestAuthEndpoints:
         response = await async_client.get("/api/auth/me")
         assert response.status_code == 401  # No auth header
 
+    async def test_unauthenticated_says_how_to_authenticate(
+        self, async_client: AsyncClient
+    ):
+        """401 without a challenge leaves the client nothing to act on."""
+        response = await async_client.get("/api/auth/me")
+        assert response.headers.get("www-authenticate") == "Bearer"
+
+    async def test_a_bad_token_is_refused_the_same_way(
+        self, async_client: AsyncClient
+    ):
+        """Absent and invalid credentials must not answer differently."""
+        response = await async_client.get(
+            "/api/auth/me", headers={"Authorization": "Bearer not-a-token"}
+        )
+        assert response.status_code == 401
+        assert response.headers.get("www-authenticate") == "Bearer"
+
 
 @pytest.mark.asyncio
 class TestSensorEndpoints:
