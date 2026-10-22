@@ -1,0 +1,2 @@
+# Place DBC files here for CANbus signal decoding
+*.dbc

@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# mypy
+.mypy_cache/
+.dmypy.json
+
+# ruff
+.ruff_cache/
+
+# Environment
+.env
+.env.local
+*.env
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Data exports
+data/exports/*.csv
+data/exports/*.zip
+
+# DaTaK runtime config — contains secrets, NEVER commit.
+# Use configs/gateway.example.yaml as template and override via DATAK_* env vars.
+configs/gateway.yaml
+
+# Node (frontend)
+node_modules/
+frontend/dist/
+
+# Docker
+docker/volumes/
+
+# OS
+.DS_Store
+Thumbs.db
+backend/configs

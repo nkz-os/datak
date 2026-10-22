@@ -1,0 +1,94 @@
+# DaTaK Gateway Configuration
+# Copy this to gateway.yaml and adjust for your environment
+
+gateway:
+  name: "DaTaK-Gateway-01"
+  log_level: "DEBUG" # DEBUG, INFO, WARNING, ERROR
+  data_dir: "/opt/datak/data"
+
+# SQLite for configuration and audit
+database:
+  url: "sqlite+aiosqlite:///data/gateway.db"
+  echo: false # Set true for SQL debug logging
+
+# InfluxDB for time-series data
+influxdb:
+  url: "http://localhost:8086"
+  token: "datak-dev-token"
+  org: "datak"
+  bucket: "sensors"
+  retention_days: 30
+
+# MQTT Broker (local Mosquitto)
+mqtt:
+  broker: "localhost"
+  port: 1883
+  client_id: "datak-gateway"
+  # username: ""
+  # password: ""
+  topics:
+    - "sensors/#"
+    - "esp32/#"
+
+# Digital Twin / Cloud connection (FIWARE IoT Agent JSON over MQTT)
+# ─────────────────────────────────────────────────────────────────
+# DaTaK acts as a northbound gateway: it collects local sensor data and
+# publishes it to a remote FIWARE IoT Agent JSON via MQTT.
+#
+# Setup:
+#   1. Create a device in Nekazari via EntityWizard (or SDM API)
+#   2. Copy the MQTT credentials shown after creation
+#   3. Fill in the values below (or override via DATAK_DIGITAL_TWIN_* env vars)
+#
+# Protocol: FIWARE IoT Agent JSON MQTT binding
+#   - Topic:   /<apikey>/<device_id>/attrs
+#   - Payload: { "attributeName": value }
+#   - The IoT Agent translates this into NGSI-LD entities in Orion-LD
+#
+# For TLS: use port 8883 or 443 (auto-detected by cloud_sync)
+# For plain MQTT: use port 1883 (or NodePort e.g. 31883)
+digital_twin:
+  enabled: false
+  host: ""                # Nekazari server IP or hostname
+  port: 1883              # MQTT port (1883/31883 plain, 8883/443 TLS)
+  topic: ""               # /<apikey>/<device_id>/attrs (from wizard)
+  username: ""            # MQTT broker username
+  password: ""            # MQTT broker password (use env var DATAK_DIGITAL_TWIN_PASSWORD)
+  entity_type: "AgriSensor"
+
+# CSV Report Generation
+reports:
+  enabled: true
+  output_dir: "data/exports"
+  intervals:
+    - "1min"
+    - "5min"
+    - "1hour"
+  retention:
+    compress_after_days: 7
+    delete_after_days: 365
+
+# Security
+security:
+  # Set to true in production: the gateway refuses to boot with insecure
+  # default secrets (jwt_secret / influxdb_token). Secret values themselves
+  # must come from DATAK_* env vars, not this file.
+  production: false
+  jwt_secret: "CHANGE-THIS-IN-PRODUCTION-use-openssl-rand-base64-32"
+  jwt_algorithm: "HS256"
+  token_expire_minutes: 1440 # 24 hours
+
+# API Server
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1 # Keep 1 for hardware access consistency
+  cors_origins:
+    - "http://localhost:5173"
+    - "http://localhost:3000"
+    - "http://YOUR_VPN_IP:5173"
+
+# Metrics (Prometheus)
+metrics:
+  enabled: true
+  port: 9100

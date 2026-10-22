@@ -1,0 +1,43 @@
+[Unit]
+Description=DaTaK IoT Edge Gateway Service
+Documentation=https://github.com/nkz-os/datak
+After=network.target influxdb.service mosquitto.service
+Wants=influxdb.service mosquitto.service
+
+[Service]
+Type=simple
+User=datak
+Group=datak
+WorkingDirectory=/opt/datak/backend
+
+# Environment
+Environment=DATAK_LOG_LEVEL=INFO
+EnvironmentFile=-/opt/datak/configs/gateway.env
+
+# Execution
+ExecStart=/opt/datak/.venv/bin/python -m app.main
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/datak/data
+PrivateTmp=true
+
+# Allow access to serial ports and CAN interfaces
+SupplementaryGroups=dialout plugdev
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=datak-gateway
+
+[Install]
+WantedBy=multi-user.target

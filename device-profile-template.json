@@ -1,0 +1,25 @@
+{
+  "name": "Estación Metereológica Pro",
+  "description": "Perfil para estación meteorológica estándar con sensores de temperatura, humedad y viento.",
+  "entityType": "WeatherStation",
+  "mappings": [
+    {
+      "incoming_key": "temp_c",
+      "target_attribute": "temperature",
+      "type": "Number",
+      "transformation": "val"
+    },
+    {
+      "incoming_key": "rel_humidity",
+      "target_attribute": "humidity",
+      "type": "Number",
+      "transformation": "val / 100"
+    },
+    {
+      "incoming_key": "wind_kph",
+      "target_attribute": "windSpeed",
+      "type": "Number",
+      "transformation": "val * 0.27778"
+    }
+  ]
+}
