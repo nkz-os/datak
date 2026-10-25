@@ -42,6 +42,7 @@ class DriverOrchestrator:
     def __init__(self):
         self._drivers: dict[int, BaseDriver] = {}
         self._formulas: dict[int, str] = {}
+        self._twin_entities: dict[int, str | None] = {}
         self._running = False
         self._log = logger.bind(component="orchestrator")
 
@@ -68,6 +69,7 @@ class DriverOrchestrator:
 
         self._drivers.clear()
         self._formulas.clear()
+        self._twin_entities.clear()
         self._log.info("Orchestrator stopped")
 
     async def add_sensor(
@@ -81,6 +83,7 @@ class DriverOrchestrator:
         timeout_ms: int = 5000,
         retry_count: int = 3,
         registers: list[dict[str, Any]] | None = None,
+        twin_entity_id: str | None = None,
     ) -> bool:
         """
         Add and start a new sensor driver (hot-reload).
@@ -129,6 +132,7 @@ class DriverOrchestrator:
 
             # Store formula
             self._formulas[sensor_id] = formula
+            self._twin_entities[sensor_id] = twin_entity_id
 
             # Start driver
             await driver.start()
@@ -145,6 +149,10 @@ class DriverOrchestrator:
         except Exception as e:
             self._log.exception("Failed to add sensor", sensor_id=sensor_id, error=str(e))
             return False
+
+    def get_twin_entity_id(self, sensor_id: int) -> str | None:
+        """Platform Device (twin entity) a sensor publishes to, if any."""
+        return self._twin_entities.get(sensor_id)
 
     async def remove_sensor(self, sensor_id: int) -> bool:
         """

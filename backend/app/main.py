@@ -139,6 +139,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                     timeout_ms=sensor.timeout_ms,
                     retry_count=sensor.retry_count,
                     registers=register_configs,
+                    twin_entity_id=sensor.twin_entity_id,
                 )
 
         logger.info("Loaded active sensors", count=len(sensors_list))

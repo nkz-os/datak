@@ -224,7 +224,7 @@ digital_twin:
   topic: "/<apikey>/<device_id>/attrs"
   username: "<mqtt_username>"       # From wizard credentials
   password: "<mqtt_password>"       # From wizard credentials
-  entity_type: "AgriSensor"
+  entity_type: "Device"
 ```
 
 Restart DaTaK after changing the config:

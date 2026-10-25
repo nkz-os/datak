@@ -1,141 +1,154 @@
 #!/usr/bin/env python3
 """
-Nekazari Auto-Configuration Script for DaTaK Gateway.
-Usage: python setup_nekazari.py <device-config.json>
+Nekazari auto-configuration for the DaTaK gateway.
 
-This script reads the JSON credentials downloaded from Nekazari Entity Wizard
-and automatically updates the DaTaK gateway.yaml configuration.
+Usage: python setup_nekazari.py <datalogger-config.json>
+
+Reads the datalogger config JSON downloaded from the platform
+(GET /api/sensors/dataloggers/<id>/config) and updates gateway.yaml with the
+broker, the datalogger username and the list of Devices (one topic each).
+
+The MQTT password is shown once by the platform and is NOT in the JSON: it is
+prompted here and stored in configs/gateway.env (mode 0600, git-ignored) as
+DATAK_DIGITAL_TWIN_PASSWORD. It is never written to gateway.yaml or printed.
 """
 
-import sys
+import getpass
 import json
-import yaml
+import os
 import shutil
+import sys
 from pathlib import Path
 
-# Configuration Paths
+import yaml
+
 BASE_DIR = Path(__file__).parent.parent
 CONFIG_DIR = BASE_DIR / "configs"
 GATEWAY_CONFIG = CONFIG_DIR / "gateway.yaml"
 EXAMPLE_CONFIG = CONFIG_DIR / "gateway.example.yaml"
+ENV_FILE = CONFIG_DIR / "gateway.env"
+PASSWORD_VAR = "DATAK_DIGITAL_TWIN_PASSWORD"
 
 
-def load_nekazari_json(json_path):
-    """Load and validate the Nekazari configuration JSON."""
+def fail(message):
+    print(f"ERROR: {message}")
+    sys.exit(1)
+
+
+def load_config(json_path):
+    """Load and validate the platform datalogger config JSON."""
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
+        with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        fail(f"cannot read {json_path}: {e}")
 
-        # Basic validation
-        required_keys = ['device_id', 'mqtt']
-        for key in required_keys:
-            if key not in data:
-                raise ValueError(f"Invalid config file: missing '{key}'")
+    mqtt = data.get("mqtt")
+    if not isinstance(mqtt, dict):
+        fail("invalid config file: missing 'mqtt'")
+    if mqtt.get("configured") is False:
+        fail(
+            "the platform has no external MQTT endpoint for this installation "
+            f"({mqtt.get('reason', 'no reason given')}). "
+            "Ask the platform administrator to configure it, then download the config again."
+        )
+    for key in ("host", "port", "username"):
+        if not mqtt.get(key):
+            fail(f"invalid config file: missing 'mqtt.{key}'")
 
-        mqtt_config = data['mqtt']
-        if 'api_key' not in mqtt_config:
-            raise ValueError("Invalid config file: missing 'mqtt.api_key'")
+    devices = data.get("devices")
+    if not isinstance(devices, list) or not devices:
+        fail(
+            "invalid config file: no 'devices' (register a Device on this datalogger first)"
+        )
+    for dev in devices:
+        if not dev.get("externalId") or not dev.get("topic"):
+            fail("invalid config file: every device needs 'externalId' and 'topic'")
+    return data
 
-        return data
-    except Exception as e:
-        print(f"❌ Error reading JSON: {e}")
-        sys.exit(1)
+
+def store_password(password):
+    """Write the password to the 0600 env file, replacing any previous value."""
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    if ENV_FILE.exists():
+        lines = [
+            line
+            for line in ENV_FILE.read_text().splitlines()
+            if not line.startswith(f"{PASSWORD_VAR}=")
+        ]
+    lines.append(f"{PASSWORD_VAR}={password}")
+    fd = os.open(ENV_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(ENV_FILE, 0o600)
 
 
-def update_gateway_yaml(nekazari_conf):
-    """Update gateway.yaml with Nekazari settings."""
-    
-    # 1. Ensure config directory exists
-    if not CONFIG_DIR.exists():
-        print(f"Creating directory: {CONFIG_DIR}")
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+def update_gateway_yaml(data):
+    """Update gateway.yaml with the datalogger settings."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 2. Load existing config or example
     config = {}
     if GATEWAY_CONFIG.exists():
         print(f"Reading existing config: {GATEWAY_CONFIG}")
-        with open(GATEWAY_CONFIG, 'r') as f:
-            config = yaml.safe_load(f) or {}
+        config = yaml.safe_load(GATEWAY_CONFIG.read_text()) or {}
     elif EXAMPLE_CONFIG.exists():
-        print(f"Start fresh from example: {EXAMPLE_CONFIG}")
-        with open(EXAMPLE_CONFIG, 'r') as f:
-            config = yaml.safe_load(f) or {}
-    else:
-        print("⚠️ No existing config found. Creating a minimal new structure.")
-        config = {"mqtt": {}, "digital_twin": {}}
+        print(f"Starting from example: {EXAMPLE_CONFIG}")
+        config = yaml.safe_load(EXAMPLE_CONFIG.read_text()) or {}
 
-    # 3. Apply changes
-    device_id = nekazari_conf.get('device_id')
-    dev_name = nekazari_conf.get('device_name', f"DaTaK-{device_id[:8]}")
-    mqtt_conf = nekazari_conf['mqtt']
-    
-    # Update Gateway Name
-    if 'gateway' not in config:
-        config['gateway'] = {}
-    config['gateway']['name'] = dev_name
-    
-    # Update Digital Twin (The connection to Nekazari)
-    if 'digital_twin' not in config:
-        config['digital_twin'] = {}
-        
-    dt = config['digital_twin']
-    dt['enabled'] = True
-    dt['host'] = mqtt_conf.get('host', 'localhost')
-    dt['port'] = int(mqtt_conf.get('port', 1883))
-    
-    # Logic to select the best topic
-    # Nekazari provides explicit topics in the JSON
-    topics = mqtt_conf.get('topics', {})
-    # Prefer JSON topic (better for SDM as it might send dicts)
-    pub_topic = topics.get('publish_data_json', topics.get('publish_data'))
-    
-    if pub_topic:
-        # Normalize: Nekazari typically shows topics with leading '/'
-        dt['topic'] = pub_topic if pub_topic.startswith("/") else f"/{pub_topic}"
-    else:
-        print("⚠️ Warning: No explicit publish topic found in JSON. Using default pattern.")
-        dt['topic'] = f"/json/{mqtt_conf.get('api_key')}/{device_id}/attrs"
+    mqtt = data["mqtt"]
+    config.setdefault("gateway", {})
+    if data.get("name"):
+        config["gateway"]["name"] = data["name"]
 
-    # Credentials
-    dt['username'] = device_id
-    dt['password'] = mqtt_conf.get('api_key')
-    
-    # Also set entity type if available
-    dt['entity_type'] = "AgriDevice" 
-    
-    print("\n✅ New Configuration:")
-    print(f"  - Host: {dt['host']}:{dt['port']}")
-    print(f"  - Device ID: {device_id}")
-    print(f"  - Topic: {dt['topic']}")
-    print("  - Auth: API Key configured")
+    dt = config.setdefault("digital_twin", {})
+    dt["enabled"] = True
+    dt["host"] = mqtt["host"]
+    dt["port"] = int(mqtt["port"])
+    dt["username"] = mqtt["username"]
+    dt["password"] = None  # secret: lives in gateway.env
+    dt["entity_type"] = "Device"
+    # Publishing is per Device now; a leftover single topic would send there.
+    dt["topic"] = ""
+    dt["devices"] = data["devices"]
 
-    # 4. Save
-    # Backup first if exists
     if GATEWAY_CONFIG.exists():
-        backup_path = GATEWAY_CONFIG.with_suffix('.yaml.bak')
-        shutil.copy(GATEWAY_CONFIG, backup_path)
-        print(f"  - Backup created: {backup_path}")
+        backup = GATEWAY_CONFIG.with_suffix(".yaml.bak")
+        shutil.copy(GATEWAY_CONFIG, backup)
+        print(f"Backup created: {backup}")
 
-    with open(GATEWAY_CONFIG, 'w') as f:
+    with open(GATEWAY_CONFIG, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-    
-    print(f"\n🎉 Successfully saved to {GATEWAY_CONFIG}")
-    print("👉 Please restart the DaTaK service to apply changes.")
+
+    print("\nNew configuration:")
+    print(f"  Broker:   {dt['host']}:{dt['port']}")
+    print(f"  Username: {dt['username']}")
+    print(f"  Devices:  {len(dt['devices'])}")
+    for dev in dt["devices"]:
+        print(f"    - {dev['externalId']} -> {dev['topic']}")
+    print(f"\nSaved to {GATEWAY_CONFIG}")
+
+
+def run(json_path):
+    data = load_config(json_path)
+    password = getpass.getpass("MQTT password (shown once by the platform): ")
+    if not password:
+        fail("a password is required")
+    update_gateway_yaml(data)
+    store_password(password)
+    print(f"Password stored in {ENV_FILE} (mode 0600).")
+    print("Restart the DaTaK service to apply changes.")
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python setup_nekazari.py <device-config.json>")
+        print("Usage: python setup_nekazari.py <datalogger-config.json>")
         sys.exit(1)
-
     json_path = Path(sys.argv[1])
     if not json_path.exists():
-        print(f"❌ File not found: {json_path}")
-        sys.exit(1)
-
-    print(f"🚀 Configuring DaTaK with: {json_path.name}")
-    data = load_nekazari_json(json_path)
-    update_gateway_yaml(data)
+        fail(f"file not found: {json_path}")
+    print(f"Configuring DaTaK with: {json_path.name}")
+    run(json_path)
 
 
 if __name__ == "__main__":
