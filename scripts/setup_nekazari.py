@@ -115,8 +115,11 @@ def update_gateway_yaml(data):
 
     if GATEWAY_CONFIG.exists():
         backup = GATEWAY_CONFIG.with_suffix(".yaml.bak")
-        shutil.copy(GATEWAY_CONFIG, backup)
-        os.chmod(backup, 0o600)  # may hold an old plaintext password
+        # May hold an old plaintext password: create it 0600, never wider.
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as out, open(GATEWAY_CONFIG, "rb") as src:
+            shutil.copyfileobj(src, out)
         print(f"Backup created: {backup}")
 
     with open(GATEWAY_CONFIG, "w") as f:

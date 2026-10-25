@@ -29,7 +29,7 @@
 
 ### System Requirements
 - **OS**: Linux (Ubuntu 20.04+, Debian 11+) or Windows with WSL2
-- **Docker**: v24.0+ with Docker Compose v2.20+
+- **Docker**: v24.0+ with Docker Compose v2.24+
 - **RAM**: Minimum 2GB, recommended 4GB+
 - **Storage**: Minimum 10GB free space
 
