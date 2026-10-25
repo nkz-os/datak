@@ -280,6 +280,7 @@ async def create_sensor(
             timeout_ms=sensor.timeout_ms,
             retry_count=sensor.retry_count,
             registers=register_configs if register_configs else None,
+            twin_entity_id=sensor.twin_entity_id,
         )
 
     # Audit log
@@ -399,6 +400,7 @@ async def update_sensor(
                 timeout_ms=sensor.timeout_ms,
                 retry_count=sensor.retry_count,
                 registers=register_configs if register_configs else None,
+                twin_entity_id=sensor.twin_entity_id,
             )
         else:
             await orchestrator.remove_sensor(sensor.id)

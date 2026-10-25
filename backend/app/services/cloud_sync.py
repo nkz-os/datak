@@ -8,7 +8,7 @@ FIWARE topic format (/<apikey>/<device_id>/attrs).
 import asyncio
 import contextlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import aiomqtt
@@ -44,6 +44,7 @@ class CloudSync:
         self._reconnect_lock = asyncio.Lock()
         self._reconnect_attempts = 0
         self._reconnect_task: asyncio.Task[None] | None = None
+        self._skip_logged: set[tuple[str, ...]] = set()
 
     @property
     def is_healthy(self) -> bool:
@@ -104,8 +105,8 @@ class CloudSync:
         sensor_id: int,  # noqa: ARG002
         sensor_name: str,
         value: float,
-        timestamp: datetime,  # noqa: ARG002
-        entity_id: str | None = None,  # noqa: ARG002
+        timestamp: datetime,
+        entity_id: str | None = None,
         attribute: str | None = None,
     ) -> bool:
         """
@@ -120,12 +121,17 @@ class CloudSync:
         if not self._connected or self._client is None:
             return False
 
-        topic = settings.digital_twin_topic
-        if not topic:
-            return False
-
         final_attr = attribute or _get_sdm_attribute(sensor_name)
-        payload = json.dumps({final_attr: value})
+        route = self._resolve_route(sensor_name, entity_id, final_attr)
+        if route is None:
+            return False
+        topic, key = route
+
+        body: dict[str, Any] = {key: value}
+        if settings.digital_twin_send_timestamp:
+            ts = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=UTC)
+            body["TimeInstant"] = ts.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        payload = json.dumps(body)
 
         try:
             await self._client.publish(topic, payload)
@@ -136,6 +142,65 @@ class CloudSync:
             self._log.error("Cloud publish error", error=str(e))
             self._trigger_reconnect()
             return False
+
+    def _resolve_route(
+        self, sensor_name: str, entity_id: str | None, attribute: str
+    ) -> tuple[str, str] | None:
+        """Return (topic, payload key) for a reading, or None if it must not be sent.
+
+        Without a configured device list the legacy single topic is used with the
+        attribute as key. With a device list, the broker ACL only accepts the
+        listed topics, so anything else is skipped (and logged once).
+        """
+        devices = settings.digital_twin_devices
+        if not devices:
+            topic = settings.digital_twin_topic
+            return (topic, attribute) if topic else None
+
+        if not entity_id:
+            topic = settings.digital_twin_topic
+            if topic:
+                return topic, attribute
+            self._skip_once(
+                ("none", sensor_name),
+                "Sensor skipped: no platform device assigned",
+                sensor_name=sensor_name,
+            )
+            return None
+
+        # twin_entity_id may be the externalId or a Device URN ending in it.
+        external_id = entity_id.rsplit(":", 1)[-1]
+        device = next((d for d in devices if d.externalId == external_id), None)
+        if device is None:
+            self._skip_once(
+                ("dev", entity_id),
+                "Sensor skipped: not a platform device",
+                sensor_name=sensor_name,
+                twin_entity_id=entity_id,
+            )
+            return None
+
+        keys = {m.key for m in device.measurements}
+        key = next((m.key for m in device.measurements if m.sdmAttribute == attribute), None)
+        if key is None and attribute in keys:
+            key = attribute
+        if key is None:
+            self._skip_once(
+                ("attr", device.externalId, attribute),
+                "Reading skipped: device has no such measurement",
+                sensor_name=sensor_name,
+                twin_entity_id=entity_id,
+                attribute=attribute,
+            )
+            return None
+        return device.topic, key
+
+    def _skip_once(self, token: tuple[str, ...], event: str, **ctx: Any) -> None:
+        """Log a skipped reading once per cause, not once per reading."""
+        if token in self._skip_logged:
+            return
+        self._skip_logged.add(token)
+        self._log.warning(event, **ctx)
 
     def _trigger_reconnect(self) -> None:
         """Schedule a reconnection attempt if one isn't already running."""
@@ -206,7 +271,7 @@ class CloudSync:
             profile: dict[str, Any] = {
                 "name": settings.gateway_name or "DaTaK Gateway",
                 "description": "Auto-generated profile from DaTaK Gateway sensors",
-                "sdm_entity_type": settings.digital_twin_entity_type or "AgriSensor",
+                "sdm_entity_type": settings.digital_twin_entity_type or "Device",
                 "mappings": mappings,
             }
 

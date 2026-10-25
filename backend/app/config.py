@@ -5,8 +5,25 @@ from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore
-from pydantic import field_validator
+from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class DeviceMeasurement(BaseModel):
+    """One measurement a platform Device accepts (from the datalogger config JSON)."""
+
+    key: str
+    sdmAttribute: str = ""  # noqa: N815 - name fixed by the platform JSON
+    unit: str = ""
+
+
+class DeviceRoute(BaseModel):
+    """A platform Device this gateway may publish to, with its exact MQTT topic."""
+
+    externalId: str  # noqa: N815 - name fixed by the platform JSON
+    name: str = ""
+    topic: str
+    measurements: list[DeviceMeasurement] = []
 
 
 class Settings(BaseSettings):
@@ -50,7 +67,13 @@ class Settings(BaseSettings):
     digital_twin_topic: str = ""
     digital_twin_username: str | None = None
     digital_twin_password: str | None = None
-    digital_twin_entity_type: str = "AgriSensor"
+    digital_twin_entity_type: str = "Device"
+    # Platform Devices this gateway may publish to (one topic each). When empty,
+    # the legacy single ``digital_twin_topic`` is used for every sensor.
+    digital_twin_devices: list[DeviceRoute] = []
+    # Add a "TimeInstant" field to each payload. Leave off unless the platform's
+    # IoT Agent is configured to honour it; otherwise it is ignored.
+    digital_twin_send_timestamp: bool = False
 
     # Security
     production: bool = False  # when True, reject insecure default secrets at startup
@@ -172,6 +195,8 @@ class Settings(BaseSettings):
                 "username": self.digital_twin_username,
                 "password": None,  # secret: set via DATAK_DIGITAL_TWIN_PASSWORD
                 "entity_type": self.digital_twin_entity_type,
+                "devices": [d.model_dump() for d in self.digital_twin_devices],
+                "send_timestamp": self.digital_twin_send_timestamp,
             },
             "security": {
                 "jwt_secret": None,  # secret: set via DATAK_JWT_SECRET

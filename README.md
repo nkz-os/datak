@@ -29,7 +29,7 @@
 
 ### System Requirements
 - **OS**: Linux (Ubuntu 20.04+, Debian 11+) or Windows with WSL2
-- **Docker**: v24.0+ with Docker Compose v2.20+
+- **Docker**: v24.0+ with Docker Compose v2.24+
 - **RAM**: Minimum 2GB, recommended 4GB+
 - **Storage**: Minimum 10GB free space
 
@@ -171,10 +171,10 @@ DaTaK is the official edge gateway for the [Nekazari Platform](https://github.co
 ```text
 1. Register sensors in DaTaK (UI or Modbus/MQTT config)
 2. Generate a DeviceProfile JSON from DaTaK
-3. Create a sensor in the Nekazari Entity Wizard, importing the profile
-4. Copy the MQTT credentials shown by the wizard
-5. Configure DaTaK gateway.yaml with those credentials
-6. DaTaK publishes SDM-compliant data → Nekazari digital twin
+3. Create a datalogger + Devices in Nekazari and download its config JSON
+4. Run scripts/setup_nekazari.py <json> and type the one-time password
+5. Assign each sensor's Device in the DaTaK UI
+6. DaTaK publishes each sensor on its Device topic → Nekazari digital twin
 ```
 
 ### Step 1: Generate a DeviceProfile
@@ -191,7 +191,7 @@ This returns a JSON profile ready to import into Nekazari:
 ```json
 {
   "name": "DaTaK Gateway",
-  "sdm_entity_type": "AgriSensor",
+  "sdm_entity_type": "Device",
   "mappings": [
     { "incoming_key": "airTemperature", "target_attribute": "airTemperature", "type": "Number" },
     { "incoming_key": "solarRadiation", "target_attribute": "solarRadiation", "type": "Number" }
@@ -199,33 +199,21 @@ This returns a JSON profile ready to import into Nekazari:
 }
 ```
 
-### Step 2: Create Sensor in Nekazari
+### Step 2: Create a datalogger and its Devices in Nekazari
 
-1. Open the **Entity Wizard** in the Nekazari platform
-2. Select **AgriSensor** as entity type
-3. Click **Import Profile** and upload the JSON from Step 1
-4. Complete the wizard — **copy the MQTT credentials** (shown once, not recoverable)
+1. In the platform, create a **datalogger** and register one **Device** per physical sensor (import the profile from Step 1 if useful).
+2. Download the datalogger config JSON (`GET /api/sensors/dataloggers/<id>/config`).
+3. The MQTT password is shown **once** by the platform: keep it for Step 3.
 
 ### Step 3: Configure DaTaK
 
-**Option A — Auto-configuration** (if Nekazari provides a `device-config.json`):
-
 ```bash
-python scripts/setup_nekazari.py path/to/device-config.json
+python scripts/setup_nekazari.py path/to/datalogger-config.json
 ```
 
-**Option B — Manual edit** of `configs/gateway.yaml`:
+Type the password when asked. It is stored in `configs/gateway.env` (mode 0600, git-ignored), never in `gateway.yaml`. Then, in the DaTaK UI, set each sensor's **Device** (`twin_entity_id` = the Device `externalId`). Each sensor publishes only on its own Device topic; sensors without a listed Device are skipped.
 
-```yaml
-digital_twin:
-  enabled: true
-  host: "nkz.YOUR_DOMAIN"      # Nekazari MQTT host
-  port: 31883                       # NodePort (or 8883 for TLS)
-  topic: "/<apikey>/<device_id>/attrs"
-  username: "<mqtt_username>"       # From wizard credentials
-  password: "<mqtt_password>"       # From wizard credentials
-  entity_type: "AgriSensor"
-```
+Manual alternative: edit `digital_twin` in `configs/gateway.yaml` (`host`, `port`, `username`, `devices: [...]` copied from the JSON) and set `DATAK_DIGITAL_TWIN_PASSWORD` in `configs/gateway.env`.
 
 Restart DaTaK after changing the config:
 

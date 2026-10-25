@@ -54,7 +54,15 @@ digital_twin:
   topic: ""               # /<apikey>/<device_id>/attrs (from wizard)
   username: ""            # MQTT broker username
   password: ""            # MQTT broker password (use env var DATAK_DIGITAL_TWIN_PASSWORD)
-  entity_type: "AgriSensor"
+  entity_type: "Device"
+  # Filled by scripts/setup_nekazari.py from the platform datalogger config:
+  # one entry per platform Device {externalId, name, topic, measurements}.
+  # A sensor publishes on the Device named by its twin_entity_id; sensors with
+  # an unlisted Device are skipped. Empty list = legacy single `topic` above.
+  devices: []
+  # Only set true if the platform's IoT Agent is configured to honour a
+  # "TimeInstant" field; otherwise it is ignored (receipt time is used).
+  send_timestamp: false
 
 # CSV Report Generation
 reports:
