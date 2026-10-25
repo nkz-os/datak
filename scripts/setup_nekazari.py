@@ -79,6 +79,7 @@ def store_password(password):
         ]
     lines.append(f"{PASSWORD_VAR}={password}")
     fd = os.open(ENV_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # before writing: the file may pre-exist with wider rights
     with os.fdopen(fd, "w") as f:
         f.write("\n".join(lines) + "\n")
     os.chmod(ENV_FILE, 0o600)
@@ -115,6 +116,7 @@ def update_gateway_yaml(data):
     if GATEWAY_CONFIG.exists():
         backup = GATEWAY_CONFIG.with_suffix(".yaml.bak")
         shutil.copy(GATEWAY_CONFIG, backup)
+        os.chmod(backup, 0o600)  # may hold an old plaintext password
         print(f"Backup created: {backup}")
 
     with open(GATEWAY_CONFIG, "w") as f:

@@ -112,3 +112,16 @@ def test_setup_ignores_password_in_json(setup):
     data["mqtt"]["password"] = "should-not-be-used"
     _run(mod, tmp, data)
     assert "should-not-be-used" not in (tmp / "configs" / "gateway.env").read_text()
+
+
+def test_existing_wide_env_file_is_tightened_and_backup_is_private(setup):
+    mod, tmp = setup
+    cfg = tmp / "configs"
+    cfg.mkdir()
+    env = cfg / "gateway.env"
+    env.write_text("DATAK_JWT_SECRET=x\n")
+    env.chmod(0o644)
+    (cfg / "gateway.yaml").write_text("digital_twin: {password: old}\n")
+    _run(mod, tmp, CONFIG)
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+    assert stat.S_IMODE((cfg / "gateway.yaml.bak").stat().st_mode) == 0o600

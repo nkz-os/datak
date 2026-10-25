@@ -75,6 +75,9 @@ services:
   backend:
     build: ../backend
     container_name: datak-backend
+    env_file:
+      - path: ../configs/gateway.env
+        required: false
     ports:
       - "8000:8000"
     environment:
