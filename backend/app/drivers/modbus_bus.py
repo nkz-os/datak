@@ -83,7 +83,7 @@ class BusSettings:
 
     round_budget_s: float = 1.0
     default_transaction_timeout_s: float = 0.25
-    quarantine_max_s: float = 300.0
+    quarantine_max_s: float = 60.0
     gateway_settle_s: float = 0.0
     delivery_queue_max: int = 10_000
 

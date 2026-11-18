@@ -163,5 +163,5 @@ def test_bus_settings_defaults() -> None:
     s = BusSettings()
     assert s.round_budget_s == 1.0
     assert s.default_transaction_timeout_s == 0.25
-    assert s.quarantine_max_s == 300.0
+    assert s.quarantine_max_s == 60.0
     assert s.gateway_settle_s == 0.0

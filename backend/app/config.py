@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     # Modbus bus scheduling (see app/drivers/modbus_bus.py for the contract)
     modbus_round_budget_ms: int = 1000  # max worst-case bus time per polling round
     modbus_transaction_timeout_ms: int = 250  # default per-transaction deadline
-    modbus_quarantine_max_s: int = 300  # backoff cap for unresponsive slaves
+    modbus_quarantine_max_s: int = 60  # backoff cap for unresponsive slaves
     modbus_gateway_settle_ms: int = 0  # pause after a failed transaction (slow gateways)
 
     @field_validator("data_dir", "reports_output_dir", mode="before")

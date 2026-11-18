@@ -109,7 +109,7 @@ modbus:
   round_budget_ms: 1000        # max worst-case bus time per polling round
   transaction_timeout_ms: 250  # default per-transaction deadline
                                # (per sensor: connection_params.transaction_timeout_ms)
-  quarantine_max_s: 300        # max backoff between probes of a dead slave
+  quarantine_max_s: 60         # max backoff between probes of a dead slave
   gateway_settle_ms: 0         # pause after a failed transaction (see note)
 # NOTE: a Modbus-TCP->RTU gateway (e.g. EBYTE) has its own serial response
 # timeout. Preferably set it SHORTER than transaction_timeout_ms. If it cannot
