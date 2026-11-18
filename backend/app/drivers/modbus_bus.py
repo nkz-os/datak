@@ -22,8 +22,14 @@ Frozen contract
   one transaction timeout per backoff period, not per poll.
 * Bus-level failures (gateway unreachable, connection lost) never count against
   a sensor's health; the bus reconnects with its own capped backoff.
-* Values are delivered (formulas, InfluxDB, MQTT...) AFTER the round releases the
-  bus, so slow consumers never eat bus time.
+* Values are handed to a per-bus delivery worker through a bounded queue
+  (formulas, InfluxDB buffer, northbound MQTT...). A slow or stalled consumer
+  (e.g. cloud link down) never slows polling; if the queue fills, readings are
+  dropped with an error log, never silently.
+* ``gateway_settle_s`` (default 0): pause after a failed transaction, for
+  TCP->RTU gateways whose own serial timeout is longer than the client
+  deadline (the gateway stays busy with the dead slave). It is charged to the
+  round budget. Preferably configure the gateway timeout below the deadline.
 
 The planning rules are pure functions (``plan_round``, ``next_health``) so they
 are unit-testable without I/O.
@@ -52,6 +58,9 @@ BACKSTOP_MARGIN_S = 0.2
 _RECONNECT_MIN_S = 1.0
 _RECONNECT_MAX_S = 30.0
 
+# Max time close() waits for queued readings to reach consumers.
+_CLOSE_DRAIN_S = 2.0
+
 # Exponent cap so 2**k never grows unbounded for long-dead sensors.
 _MAX_BACKOFF_EXPONENT = 30
 
@@ -75,6 +84,8 @@ class BusSettings:
     round_budget_s: float = 1.0
     default_transaction_timeout_s: float = 0.25
     quarantine_max_s: float = 300.0
+    gateway_settle_s: float = 0.0
+    delivery_queue_max: int = 10_000
 
     def __post_init__(self) -> None:
         if self.round_budget_s <= 0:
@@ -92,6 +103,10 @@ class BusSettings:
             )
         if self.quarantine_max_s <= 0:
             raise ValueError(f"quarantine_max_s must be > 0, got {self.quarantine_max_s}")
+        if self.gateway_settle_s < 0:
+            raise ValueError(f"gateway_settle_s must be >= 0, got {self.gateway_settle_s}")
+        if self.delivery_queue_max < 1:
+            raise ValueError(f"delivery_queue_max must be >= 1, got {self.delivery_queue_max}")
 
 
 @dataclass(frozen=True)
@@ -120,6 +135,7 @@ class SensorStats:
     successes: int = 0
     failures: int = 0
     deferred_rounds: int = 0
+    dropped_deliveries: int = 0
     last_latency_s: float | None = None
     max_latency_s: float = 0.0
 
@@ -203,8 +219,8 @@ class BusJob(Protocol):
 def set_response_timeout(client: Any, timeout_s: float) -> None:
     """Set pymodbus' per-request response deadline on a client owned by one bus.
 
-    pymodbus >= 3.9 reads ``ctx.comm_params.timeout_connect`` for every
-    attempt; the scheduler serialises all requests on a bus, so mutating it
+    pymodbus 3.15 reads ``ctx.comm_params.timeout_connect`` for every
+    attempt (pinned in pyproject; ``assert_supported_client`` fails fast otherwise); the scheduler serialises all requests on a bus, so mutating it
     right before each transaction gives a per-sensor deadline without
     cancelling requests from outside the library.
     """
@@ -245,6 +261,10 @@ class BusScheduler:
         # asyncio.wait_for (3.12) can swallow a cancel that races with the wake
         # event, leaving the loop asleep with no sensors.
         self._closed = False
+        self._deliveries: asyncio.Queue[tuple[BusJob, Any, datetime]] = asyncio.Queue(
+            maxsize=settings.delivery_queue_max
+        )
+        self._deliver_task: asyncio.Task[None] | None = None
         self._reconnect_delay_s = 0.0
         self._reconnect_at = 0.0
         self._log = logger.bind(component="modbus_bus", bus=key)
@@ -272,6 +292,10 @@ class BusScheduler:
         )
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name=f"modbus-bus:{self.key}")
+        if self._deliver_task is None or self._deliver_task.done():
+            self._deliver_task = asyncio.create_task(
+                self._deliver_loop(), name=f"modbus-deliver:{self.key}"
+            )
         self._wake.set()
 
     def unregister(self, sensor_id: int) -> bool:
@@ -312,8 +336,9 @@ class BusScheduler:
             while not self._closed:
                 self._wake.clear()
                 now = loop.time()
+                settle = self.settings.gateway_settle_s
                 slots = [
-                    PollSlot(sid, r.state.next_due, r.job.worst_case_s)
+                    PollSlot(sid, r.state.next_due, r.job.worst_case_s + settle)
                     for sid, r in self._regs.items()
                 ]
                 admitted = plan_round(slots, now, self.settings.round_budget_s)
@@ -327,18 +352,42 @@ class BusScheduler:
 
                 deliveries = await self._run_round(admitted)
 
-                # Bus released: deliver values, then yield so waiting writers get in.
-                for job, result, ts in deliveries:
-                    try:
-                        await job.deliver(result, ts)
-                    except Exception as exc:  # consumer failure must not kill the bus
-                        self._log.exception(
-                            "Value delivery failed", sensor_id=job.sensor_id, error=str(exc)
-                        )
+                # Bus released: hand values to the delivery worker (never blocks),
+                # then yield so waiting writers get in.
+                for item in deliveries:
+                    self._enqueue_delivery(item)
                 await asyncio.sleep(0)
         except asyncio.CancelledError:
             self._log.info("Bus scheduler stopped")
             raise
+
+    def _enqueue_delivery(self, item: tuple[BusJob, Any, datetime]) -> None:
+        try:
+            self._deliveries.put_nowait(item)
+        except asyncio.QueueFull:
+            job = item[0]
+            reg = self._regs.get(job.sensor_id)
+            if reg is not None:
+                reg.stats.dropped_deliveries += 1
+            self._log.error(
+                "Delivery queue full: reading DROPPED (consumers stalled)",
+                sensor_id=job.sensor_id,
+                queue_max=self.settings.delivery_queue_max,
+            )
+
+    async def _deliver_loop(self) -> None:
+        while True:
+            job, result, ts = await self._deliveries.get()
+            try:
+                await job.deliver(result, ts)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # consumer failure must not kill delivery
+                self._log.exception(
+                    "Value delivery failed", sensor_id=job.sensor_id, error=str(exc)
+                )
+            finally:
+                self._deliveries.task_done()
 
     async def _sleep_until_next(self, slots: Sequence[PollSlot], now: float) -> None:
         delay = min((s.next_due for s in slots), default=now + 3600.0) - now
@@ -360,13 +409,17 @@ class BusScheduler:
                 if reg is None:  # unregistered mid-round
                     continue
                 elapsed = loop.time() - round_start
-                if index > 0 and elapsed + reg.job.worst_case_s > self.settings.round_budget_s:
+                cost = reg.job.worst_case_s + self.settings.gateway_settle_s
+                if index > 0 and elapsed + cost > self.settings.round_budget_s:
                     # Real overhead consumed the slack: defer instead of overrunning.
                     reg.stats.deferred_rounds += 1
                     continue
                 outcome = await self._poll_one(reg)
                 if outcome is not None:
                     deliveries.append(outcome)
+                elif self.settings.gateway_settle_s > 0:
+                    # Let a TCP->RTU gateway finish waiting for the failed slave.
+                    await asyncio.sleep(self.settings.gateway_settle_s)
 
             round_s = loop.time() - round_start
             if round_s > self.settings.round_budget_s:
@@ -495,6 +548,19 @@ class BusScheduler:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        if self._deliver_task is not None:
+            # Give pending readings a bounded chance to reach consumers.
+            try:
+                await asyncio.wait_for(self._deliveries.join(), timeout=_CLOSE_DRAIN_S)
+            except TimeoutError:
+                self._log.error(
+                    "Bus closed with undelivered readings",
+                    pending=self._deliveries.qsize(),
+                )
+            self._deliver_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._deliver_task
+            self._deliver_task = None
         with contextlib.suppress(Exception):
             self.client.close()
 

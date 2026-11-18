@@ -98,6 +98,7 @@ class Settings(BaseSettings):
     modbus_round_budget_ms: int = 1000  # max worst-case bus time per polling round
     modbus_transaction_timeout_ms: int = 250  # default per-transaction deadline
     modbus_quarantine_max_s: int = 300  # backoff cap for unresponsive slaves
+    modbus_gateway_settle_ms: int = 0  # pause after a failed transaction (slow gateways)
 
     @field_validator("data_dir", "reports_output_dir", mode="before")
     @classmethod
@@ -225,6 +226,7 @@ class Settings(BaseSettings):
                 "round_budget_ms": self.modbus_round_budget_ms,
                 "transaction_timeout_ms": self.modbus_transaction_timeout_ms,
                 "quarantine_max_s": self.modbus_quarantine_max_s,
+                "gateway_settle_ms": self.modbus_gateway_settle_ms,
             },
         }
 

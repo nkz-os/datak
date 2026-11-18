@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import socket
 import time
 from collections.abc import Iterator
@@ -52,7 +53,10 @@ class FakeGateway:
     """
 
     def __init__(self, values: dict[int, int], slow: dict[int, int] | None = None,
-                 slow_delay_s: float = 0.3) -> None:
+                 slow_delay_s: float = 0.3, serial_timeout_s: float | None = None) -> None:
+        # serial_timeout_s: half-duplex RTU side. A silent slave keeps the gateway
+        # busy for this long; requests queued meanwhile are served afterwards.
+        self.serial_timeout_s = serial_timeout_s
         self.values = values
         self.slow = slow or {}
         self.slow_delay_s = slow_delay_s
@@ -102,6 +106,9 @@ class FakeGateway:
                     )
                     self._late.add(task)
                     task.add_done_callback(self._late.discard)
+                elif self.serial_timeout_s:
+                    # Silent slave: the gateway holds the RS485 line until its timeout.
+                    await asyncio.sleep(self.serial_timeout_s)
                 # else: silent, like a dead RS485 slave behind a gateway
         except (asyncio.IncompleteReadError, ConnectionError):
             pass
@@ -110,8 +117,10 @@ class FakeGateway:
             writer.close()
 
 
-async def _start_server(port: int, slow: dict[int, int] | None = None) -> FakeGateway:
-    gateway = FakeGateway({1: 11, 2: 22}, slow=slow)
+async def _start_server(
+    port: int, slow: dict[int, int] | None = None, serial_timeout_s: float | None = None
+) -> FakeGateway:
+    gateway = FakeGateway({1: 11, 2: 22}, slow=slow, serial_timeout_s=serial_timeout_s)
     await gateway.start(port)
     return gateway
 
@@ -136,17 +145,16 @@ class Sink:
         self.statuses.setdefault(sensor_id, []).append(status)
 
 
-def _driver(sensor_id: int, slave: int, port: int, sink: Sink) -> ModbusDriver:
+def _driver(
+    sensor_id: int, slave: int, port: int, sink: Sink, tx_ms: int | None = TX_TIMEOUT_MS
+) -> ModbusDriver:
+    config: dict[str, Any] = {"mode": "tcp", "host": "127.0.0.1", "port": port, "slave_id": slave}
+    if tx_ms is not None:
+        config["transaction_timeout_ms"] = tx_ms
     driver = ModbusDriver(
         sensor_id=sensor_id,
         sensor_name=f"slave{slave}",
-        config={
-            "mode": "tcp",
-            "host": "127.0.0.1",
-            "port": port,
-            "slave_id": slave,
-            "transaction_timeout_ms": TX_TIMEOUT_MS,
-        },
+        config=config,
         registers=[
             {"id": sensor_id * 10, "name": "r0", "address": 0, "count": 1, "register_type": "holding"},
             {"id": sensor_id * 10 + 1, "name": "r1", "address": 1, "count": 1, "register_type": "holding"},
@@ -286,3 +294,133 @@ async def test_late_reply_is_discarded_and_not_misattributed() -> None:
         for d in drivers:
             await d.stop()
         await server.stop()
+
+
+@contextlib.contextmanager
+def _settings(**overrides: Any) -> Iterator[BusSettings]:
+    previous = modbus_bus.current_settings()
+    settings = dataclasses.replace(SETTINGS, **overrides)
+    modbus_bus.configure(settings)
+    try:
+        yield settings
+    finally:
+        modbus_bus.configure(previous)
+
+
+async def _run_bank(
+    port: int, sink: Sink, run_s: float, extra: list[ModbusDriver] | None = None
+) -> tuple[modbus_bus.BusScheduler, list[ModbusDriver]]:
+    drivers = [_driver(1, 1, port, sink), _driver(2, 2, port, sink), _driver(9, 9, port, sink)]
+    drivers += extra or []
+    for d in drivers:
+        await d.start()
+    await asyncio.sleep(run_s)
+    bus = modbus_bus.get_bus(f"tcp://127.0.0.1:{port}")
+    assert bus is not None
+    return bus, drivers
+
+
+@pytest.mark.parametrize(
+    ("serial_timeout_s", "settle_s", "collateral_expected"),
+    [
+        (0.05, 0.0, False),  # gateway timeout < client deadline: no collateral
+        (0.3, 0.25, False),  # longer gateway timeout compensated by settle
+        (0.3, 0.0, True),  # longer gateway timeout, no settle: neighbour fails
+    ],
+)
+async def test_half_duplex_gateway(
+    serial_timeout_s: float, settle_s: float, collateral_expected: bool
+) -> None:
+    port = _free_port()
+    server = await _start_server(port, serial_timeout_s=serial_timeout_s)
+    sink = Sink()
+    drivers: list[ModbusDriver] = []
+    with _settings(gateway_settle_s=settle_s):
+        try:
+            bus, drivers = await _run_bank(port, sink, 3.0)
+            s1, s2 = bus.stats(1), bus.stats(2)
+            assert s1 is not None and s2 is not None
+            collateral = s1.failures + s2.failures
+            if collateral_expected:
+                assert collateral > 0
+            else:
+                assert collateral == 0, (s1, s2)
+                for sid in (1, 2):
+                    assert bus.health(sid).health is SensorHealth.ONLINE  # type: ignore[union-attr]
+                    # With settle, each dead-slave probe holds the line for
+                    # deadline + settle, so cadence only stays >= 80 % when the
+                    # gateway itself is fast (test quarantine cap is just 1 s).
+                    if settle_s == 0.0:
+                        assert len(sink.values[sid]) / 2 >= 0.8 * (3.0 / (POLL_MS / 1000))
+            assert set(sink.values.get(1, [])) <= {11.0}
+            assert set(sink.values.get(2, [])) <= {22.0}
+        finally:
+            for d in drivers:
+                await d.stop()
+            await server.stop()
+
+
+@pytest.mark.usefixtures("bus_settings")
+async def test_per_sensor_transaction_timeout_is_applied() -> None:
+    port = _free_port()
+    server = await _start_server(port)
+    sink = Sink()
+    fast_dead = _driver(9, 9, port, sink, tx_ms=40)
+    default_dead = _driver(8, 8, port, sink, tx_ms=None)  # bus default: 100 ms
+    try:
+        for d in (fast_dead, default_dead):
+            await d.start()
+        await asyncio.sleep(1.0)
+        bus = modbus_bus.get_bus(f"tcp://127.0.0.1:{port}")
+        assert bus is not None
+        fast, slow = bus.stats(9), bus.stats(8)
+        assert fast is not None and slow is not None
+        assert fast.attempts and slow.attempts
+        assert 0.035 <= fast.max_latency_s <= 0.07, fast
+        assert 0.095 <= slow.max_latency_s <= 0.15, slow
+    finally:
+        for d in (fast_dead, default_dead):
+            await d.stop()
+        await server.stop()
+
+
+async def test_slow_consumer_does_not_slow_polling() -> None:
+    """A stalled consumer (e.g. cloud link down) must not freeze data collection."""
+    port = _free_port()
+    server = await _start_server(port)
+    sink = Sink()
+    polled_at: list[float] = []
+    drivers: list[ModbusDriver] = []
+
+    async def stalled_consumer(_sensor_id: int, _readings: list[dict[str, Any]], _ts: Any) -> None:
+        await asyncio.sleep(2.0)
+
+    with _settings(delivery_queue_max=3):
+        try:
+            slow = _driver(1, 1, port, sink)
+            slow.on_value_batch(stalled_consumer)
+            fast = _driver(2, 2, port, sink)
+            original = fast.transact
+
+            async def timed_transact() -> Any:
+                polled_at.append(time.monotonic())
+                return await original()
+
+            fast.transact = timed_transact  # type: ignore[method-assign]
+            drivers = [slow, fast]
+            for d in drivers:
+                await d.start()
+            await asyncio.sleep(2.0)
+            bus = modbus_bus.get_bus(f"tcp://127.0.0.1:{port}")
+            assert bus is not None
+            # Sensor 2 keeps polling at its own rate despite sensor 1's stalled consumer.
+            assert len(polled_at) >= 0.8 * (2.0 / (POLL_MS / 1000)), len(polled_at)
+            s1 = bus.stats(1)
+            assert s1 is not None
+            # Sensor 1 keeps being POLLED too; overflow is counted, never silent.
+            assert s1.successes >= 0.8 * (2.0 / (POLL_MS / 1000))
+            assert s1.dropped_deliveries > 0
+        finally:
+            for d in drivers:
+                await d.stop()
+            await server.stop()

@@ -150,6 +150,8 @@ def test_backoff_never_shorter_than_interval() -> None:
         {"quarantine_max_s": 0.0},
         {"default_transaction_timeout_s": 0.0},
         {"default_transaction_timeout_s": 2.0, "round_budget_s": 1.0},
+        {"gateway_settle_s": -0.1},
+        {"delivery_queue_max": 0},
     ],
 )
 def test_bus_settings_rejects_invalid(kwargs: dict[str, float]) -> None:
@@ -162,3 +164,4 @@ def test_bus_settings_defaults() -> None:
     assert s.round_budget_s == 1.0
     assert s.default_transaction_timeout_s == 0.25
     assert s.quarantine_max_s == 300.0
+    assert s.gateway_settle_s == 0.0

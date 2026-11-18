@@ -75,6 +75,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             round_budget_s=settings.modbus_round_budget_ms / 1000,
             default_transaction_timeout_s=settings.modbus_transaction_timeout_ms / 1000,
             quarantine_max_s=float(settings.modbus_quarantine_max_s),
+            gateway_settle_s=settings.modbus_gateway_settle_ms / 1000,
         )
     )
     logger.info(
@@ -82,6 +83,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         round_budget_ms=settings.modbus_round_budget_ms,
         transaction_timeout_ms=settings.modbus_transaction_timeout_ms,
         quarantine_max_s=settings.modbus_quarantine_max_s,
+        gateway_settle_ms=settings.modbus_gateway_settle_ms,
     )
 
     # Start services

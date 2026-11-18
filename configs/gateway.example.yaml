@@ -110,6 +110,8 @@ modbus:
   transaction_timeout_ms: 250  # default per-transaction deadline
                                # (per sensor: connection_params.transaction_timeout_ms)
   quarantine_max_s: 300        # max backoff between probes of a dead slave
+  gateway_settle_ms: 0         # pause after a failed transaction (see note)
 # NOTE: a Modbus-TCP->RTU gateway (e.g. EBYTE) has its own serial response
-# timeout. It must be SHORTER than transaction_timeout_ms, otherwise the gateway
-# stays busy waiting for a dead slave after the client has already moved on.
+# timeout. Preferably set it SHORTER than transaction_timeout_ms. If it cannot
+# be changed, set gateway_settle_ms >= gateway timeout - transaction_timeout_ms,
+# otherwise the sensor polled right after a dead slave also times out.
