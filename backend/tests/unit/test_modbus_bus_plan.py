@@ -12,8 +12,10 @@ import pytest
 from app.drivers.modbus_bus import (
     BusSettings,
     HealthState,
+    LoadEntry,
     PollSlot,
     SensorHealth,
+    assess_feasibility,
     next_health,
     plan_round,
 )
@@ -165,3 +167,57 @@ def test_bus_settings_defaults() -> None:
     assert s.default_transaction_timeout_s == 0.25
     assert s.quarantine_max_s == 60.0
     assert s.gateway_settle_s == 0.0
+
+
+# ── assess_feasibility ────────────────────────────────────────────────────────
+
+
+def _bank(n: int, interval: float, typical: float | None = 0.035) -> list[LoadEntry]:
+    return [LoadEntry(i, interval, 0.25, typical) for i in range(1, n + 1)]
+
+
+def test_feasible_bank_has_no_warnings() -> None:
+    # Field numbers: 10 sensors, ~35 ms each, scanned every 1 s -> ~35 %.
+    f = assess_feasibility(_bank(10, 1.0), BusSettings(round_budget_s=1.0))
+    assert f.typical_utilisation == pytest.approx(0.35)
+    assert f.worst_case_utilisation == pytest.approx(2.5)
+    assert f.warnings == ()
+
+
+def test_budget_longer_than_shortest_interval_warns() -> None:
+    f = assess_feasibility(_bank(4, 0.5), BusSettings(round_budget_s=1.0))
+    assert any("shortest poll interval" in w for w in f.warnings)
+
+
+def test_near_saturation_warns() -> None:
+    f = assess_feasibility(_bank(10, 0.4), BusSettings(round_budget_s=0.4))
+    assert f.typical_utilisation == pytest.approx(0.875)
+    assert any("close to saturation" in w for w in f.warnings)
+
+
+def test_over_capacity_warns() -> None:
+    f = assess_feasibility(_bank(10, 0.3), BusSettings(round_budget_s=0.3))
+    assert f.typical_utilisation > 1.0
+    assert any("over capacity" in w for w in f.warnings)
+
+
+def test_unmeasured_counts_worst_case_and_quarantined_is_excluded() -> None:
+    entries = [
+        LoadEntry(1, 1.0, 0.25, 0.03),
+        LoadEntry(2, 1.0, 0.25, None),  # not measured yet -> worst case
+        LoadEntry(3, 1.0, 0.25, None, quarantined=True),  # dead -> excluded
+    ]
+    f = assess_feasibility(entries, BusSettings())
+    assert f.typical_utilisation == pytest.approx(0.28)
+
+
+def test_settle_is_charged_to_worst_case() -> None:
+    f = assess_feasibility(
+        [LoadEntry(1, 1.0, 0.25, None)], BusSettings(gateway_settle_s=0.25)
+    )
+    assert f.worst_case_utilisation == pytest.approx(0.5)
+
+
+def test_empty_bus_is_feasible() -> None:
+    f = assess_feasibility([], BusSettings())
+    assert (f.typical_utilisation, f.warnings) == (0.0, ())

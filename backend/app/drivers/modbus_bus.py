@@ -30,6 +30,11 @@ Frozen contract
   TCP->RTU gateways whose own serial timeout is longer than the client
   deadline (the gateway stays busy with the dead slave). It is charged to the
   round budget. Preferably configure the gateway timeout below the deadline.
+* Feasibility is checked per bus (``assess_feasibility``) after every
+  registration change and every ``FEASIBILITY_LOG_PERIOD_S``: bus utilisation
+  (typical = measured latency, worst case = every transaction timing out) and
+  round budget vs. the shortest poll interval. Problems are logged as warnings
+  so an impossible configuration cannot go unnoticed.
 
 The planning rules are pure functions (``plan_round``, ``next_health``) so they
 are unit-testable without I/O.
@@ -60,6 +65,15 @@ _RECONNECT_MAX_S = 30.0
 
 # Max time close() waits for queued readings to reach consumers.
 _CLOSE_DRAIN_S = 2.0
+
+# How often the measured bus utilisation is re-assessed and logged.
+FEASIBILITY_LOG_PERIOD_S = 60.0
+# Delay before re-assessing after a registration change (startup debounce).
+_ASSESS_DEBOUNCE_S = 2.0
+# Typical utilisation above this is reported as close to saturation.
+UTILISATION_WARN = 0.8
+# Weight of the newest sample in the moving average of successful latency.
+_LATENCY_EWMA_ALPHA = 0.2
 
 # Exponent cap so 2**k never grows unbounded for long-dead sensors.
 _MAX_BACKOFF_EXPONENT = 30
@@ -138,6 +152,7 @@ class SensorStats:
     dropped_deliveries: int = 0
     last_latency_s: float | None = None
     max_latency_s: float = 0.0
+    avg_ok_latency_s: float | None = None  # EWMA over successful polls only
 
 
 def plan_round(slots: Sequence[PollSlot], now: float, budget_s: float) -> list[int]:
@@ -185,6 +200,67 @@ def next_health(
     backoff = min(interval_s * (2**exponent), quarantine_max_s)
     backoff = max(backoff, interval_s)
     return HealthState(SensorHealth.QUARANTINED, failures, now + backoff)
+
+
+@dataclass(frozen=True)
+class LoadEntry:
+    """Planning view of one sensor for the feasibility check."""
+
+    sensor_id: int
+    interval_s: float
+    worst_case_s: float
+    typical_s: float | None  # measured; None until the sensor answered once
+    quarantined: bool = False
+
+
+@dataclass(frozen=True)
+class Feasibility:
+    worst_case_utilisation: float
+    typical_utilisation: float
+    min_interval_s: float | None
+    warnings: tuple[str, ...]
+
+
+def assess_feasibility(
+    entries: Sequence[LoadEntry], settings: BusSettings
+) -> Feasibility:
+    """Can this bus serve its sensors at their configured intervals?
+
+    Utilisation = sum(time on the bus per poll / poll interval). Above 1.0 the
+    bus cannot keep up: sensors are deferred (polled less often than
+    configured), never lost. Worst case assumes every transaction times out;
+    it is informative only, since quarantine removes dead slaves from the load.
+    Typical uses the measured latency; a sensor not measured yet counts with
+    its worst case, and a quarantined one is excluded (its probes are rare).
+    """
+    if not entries:
+        return Feasibility(0.0, 0.0, None, ())
+    settle = settings.gateway_settle_s
+    worst = sum((e.worst_case_s + settle) / e.interval_s for e in entries)
+    typical = sum(
+        ((e.typical_s if e.typical_s is not None else e.worst_case_s + settle) / e.interval_s)
+        for e in entries
+        if not e.quarantined
+    )
+    shortest = min(entries, key=lambda e: e.interval_s)
+
+    warnings: list[str] = []
+    if settings.round_budget_s > shortest.interval_s:
+        warnings.append(
+            f"round budget {settings.round_budget_s:.3f}s exceeds the shortest poll "
+            f"interval {shortest.interval_s:.3f}s (sensor {shortest.sensor_id}): "
+            "that sensor can be delayed by up to one round"
+        )
+    if typical > 1.0:
+        warnings.append(
+            f"bus over capacity: typical utilisation {typical:.0%} > 100%; sensors "
+            "will be polled less often than configured (raise intervals or split the bus)"
+        )
+    elif typical > UTILISATION_WARN:
+        warnings.append(
+            f"bus close to saturation: typical utilisation {typical:.0%}"
+        )
+    return Feasibility(worst, typical, shortest.interval_s, tuple(warnings))
 
 
 class BusJob(Protocol):
@@ -261,6 +337,7 @@ class BusScheduler:
         # asyncio.wait_for (3.12) can swallow a cancel that races with the wake
         # event, leaving the loop asleep with no sensors.
         self._closed = False
+        self._assess_due = 0.0  # loop time of the next feasibility log
         self._deliveries: asyncio.Queue[tuple[BusJob, Any, datetime]] = asyncio.Queue(
             maxsize=settings.delivery_queue_max
         )
@@ -283,6 +360,8 @@ class BusScheduler:
                 round_budget_s=self.settings.round_budget_s,
             )
         self._regs[job.sensor_id] = _Registration(job, HealthState(next_due=loop.time()))
+        # Re-assess shortly after registrations settle (debounced at startup).
+        self._assess_due = loop.time() + _ASSESS_DEBOUNCE_S
         self._log.info(
             "Sensor registered on bus",
             sensor_id=job.sensor_id,
@@ -301,12 +380,44 @@ class BusScheduler:
     def unregister(self, sensor_id: int) -> bool:
         """Remove a sensor (synchronous). Returns True when the bus has no sensors left."""
         self._regs.pop(sensor_id, None)
+        self._assess_due = asyncio.get_running_loop().time() + _ASSESS_DEBOUNCE_S
         self._wake.set()
         return not self._regs
 
     def health(self, sensor_id: int) -> HealthState | None:
         reg = self._regs.get(sensor_id)
         return reg.state if reg else None
+
+    def feasibility(self) -> Feasibility:
+        entries = [
+            LoadEntry(
+                sid,
+                r.job.interval_s,
+                r.job.worst_case_s,
+                r.stats.avg_ok_latency_s,
+                quarantined=r.state.health is SensorHealth.QUARANTINED,
+            )
+            for sid, r in self._regs.items()
+        ]
+        return assess_feasibility(entries, self.settings)
+
+    def _log_feasibility(self) -> None:
+        f = self.feasibility()
+        fields: dict[str, Any] = {
+            "sensors": len(self._regs),
+            "typical_utilisation": round(f.typical_utilisation, 3),
+            "quarantined": sum(
+                1 for r in self._regs.values() if r.state.health is SensorHealth.QUARANTINED
+            ),
+            "worst_case_utilisation": round(f.worst_case_utilisation, 3),
+            "min_interval_s": f.min_interval_s,
+            "round_budget_s": self.settings.round_budget_s,
+        }
+        if f.warnings:
+            for w in f.warnings:
+                self._log.warning("Bus feasibility", problem=w, **fields)
+        else:
+            self._log.info("Bus feasibility OK", **fields)
 
     def stats(self, sensor_id: int) -> SensorStats | None:
         reg = self._regs.get(sensor_id)
@@ -336,6 +447,9 @@ class BusScheduler:
             while not self._closed:
                 self._wake.clear()
                 now = loop.time()
+                if now >= self._assess_due and self._regs:
+                    self._log_feasibility()
+                    self._assess_due = now + FEASIBILITY_LOG_PERIOD_S
                 settle = self.settings.gateway_settle_s
                 slots = [
                     PollSlot(sid, r.state.next_due, r.job.worst_case_s + settle)
@@ -457,6 +571,12 @@ class BusScheduler:
         latency = loop.time() - started
         reg.stats.last_latency_s = latency
         reg.stats.max_latency_s = max(reg.stats.max_latency_s, latency)
+        if error is None:
+            prev = reg.stats.avg_ok_latency_s
+            reg.stats.avg_ok_latency_s = (
+                latency if prev is None
+                else prev + _LATENCY_EWMA_ALPHA * (latency - prev)
+            )
         ok = error is None
         if ok:
             reg.stats.successes += 1
