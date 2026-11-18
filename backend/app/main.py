@@ -16,6 +16,8 @@ from app.api.routes import auth, automation, config, export, report_jobs, sensor
 from app.config import get_settings
 from app.db.influx import influx_client
 from app.db.session import close_db, init_db
+from app.drivers import modbus_bus
+from app.drivers.modbus_bus import BusSettings
 from app.services.automation import automation_engine
 from app.services.buffer import buffer_queue
 from app.services.cloud_sync import cloud_sync
@@ -66,6 +68,21 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("InfluxDB connected")
     else:
         logger.warning("InfluxDB not available, running in buffer mode")
+
+    # Modbus bus timing contract: must be set before any sensor is added.
+    modbus_bus.configure(
+        BusSettings(
+            round_budget_s=settings.modbus_round_budget_ms / 1000,
+            default_transaction_timeout_s=settings.modbus_transaction_timeout_ms / 1000,
+            quarantine_max_s=float(settings.modbus_quarantine_max_s),
+        )
+    )
+    logger.info(
+        "Modbus bus settings",
+        round_budget_ms=settings.modbus_round_budget_ms,
+        transaction_timeout_ms=settings.modbus_transaction_timeout_ms,
+        quarantine_max_s=settings.modbus_quarantine_max_s,
+    )
 
     # Start services
     await orchestrator.start()

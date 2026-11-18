@@ -100,3 +100,16 @@ api:
 metrics:
   enabled: true
   port: 9100
+
+# Modbus bus scheduling (applies to every Modbus TCP gateway / RS485 port)
+# One scheduler per bus serialises all traffic. A missing or dead slave can
+# never block the others: each transaction has its own deadline, each polling
+# round is capped, and unresponsive slaves are quarantined with backoff.
+modbus:
+  round_budget_ms: 1000        # max worst-case bus time per polling round
+  transaction_timeout_ms: 250  # default per-transaction deadline
+                               # (per sensor: connection_params.transaction_timeout_ms)
+  quarantine_max_s: 300        # max backoff between probes of a dead slave
+# NOTE: a Modbus-TCP->RTU gateway (e.g. EBYTE) has its own serial response
+# timeout. It must be SHORTER than transaction_timeout_ms, otherwise the gateway
+# stays busy waiting for a dead slave after the client has already moved on.
