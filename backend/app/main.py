@@ -4,6 +4,8 @@ DaTaK Gateway - Main FastAPI Application Entry Point.
 This is the main entry point for the IoT Edge Gateway service.
 """
 
+import logging
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -26,6 +28,31 @@ from app.services.csv_engine import csv_generator
 from app.services.orchestrator import orchestrator
 from app.services.telemetry_pipeline import telemetry_pipeline
 
+settings = get_settings()
+
+
+def configure_stdlib_logging(level_name: str) -> int:
+    """Route structlog's stdlib loggers to stdout at the configured level.
+
+    Without this the root logger stays at WARNING and every ``info`` event
+    (startup, sensor registration, bus feasibility, health changes) is dropped.
+    """
+    level = logging.getLevelName(level_name.upper())
+    if not isinstance(level, int):
+        level = logging.INFO
+    logging.basicConfig(level=level, format="%(message)s", stream=sys.stdout, force=True)
+    # Third-party chatter stays at WARNING; our own modules follow the setting.
+    for noisy in ("pymodbus", "httpx", "httpcore", "aiosqlite", "urllib3"):
+        logging.getLogger(noisy).setLevel(max(level, logging.WARNING))
+    if level != logging.getLevelName(level_name.upper()):
+        logging.getLogger(__name__).warning(
+            "Unknown log_level %r, using INFO", level_name
+        )
+    return level
+
+
+configure_stdlib_logging(settings.log_level)
+
 # Configure structured logging
 structlog.configure(
     processors=[
@@ -44,7 +71,6 @@ structlog.configure(
 )
 
 logger = structlog.get_logger()
-settings = get_settings()
 
 
 @asynccontextmanager
