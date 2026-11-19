@@ -117,3 +117,24 @@ async def test_timestamp_sent_only_if_supported(sync, monkeypatch):
     monkeypatch.setattr(cs.settings, "digital_twin_send_timestamp", True)
     await _send(sync, twin="dev-a")
     assert '"TimeInstant": "2026-01-01T00:00:00Z"' in sync._client.publish.call_args.args[1]
+
+
+async def test_payload_carries_timeinstant_when_enabled(sync, monkeypatch):
+    """TimeInstant is UTC with a Z suffix, whatever the reading's tz."""
+    import json
+    from datetime import timedelta, timezone
+
+    monkeypatch.setattr(cs.settings, "digital_twin_send_timestamp", True)
+    cases = [
+        datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        datetime(2026, 1, 1, 2, 0, 0, tzinfo=timezone(timedelta(hours=2))),
+        datetime(2025, 12, 31, 23, 0, 0, tzinfo=timezone(timedelta(hours=-1))),
+        datetime(2026, 1, 1, 0, 0, 0),  # naive is taken as UTC
+    ]
+    for ts in cases:
+        await sync.send_reading(
+            sensor_id=1, sensor_name="Air temp", value=21.5, timestamp=ts,
+            entity_id="dev-a", attribute="airTemperature",
+        )
+        body = json.loads(sync._client.publish.call_args.args[1])
+        assert body["TimeInstant"] == "2026-01-01T00:00:00Z"
