@@ -63,6 +63,13 @@ digital_twin:
   # Send the device reading time as "TimeInstant" (UTC). The platform keeps it
   # as the observation time, so buffered readings sent late keep their time.
   send_timestamp: true
+  # Seconds per northbound window. 0 = send every reading as it arrives. N > 0 =
+  # one message per Device every N s (windows aligned to the clock), each value
+  # the window mean, TimeInstant = window end. Raw readings stay local.
+  publish_interval_s: 60
+  # Attributes sent as the window's last value instead of the mean (counters).
+  last_value_attributes:
+    - precipitationAccumulated
 
 # CSV Report Generation
 reports:

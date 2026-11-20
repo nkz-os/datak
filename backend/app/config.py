@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     # Add a "TimeInstant" field to each payload. Leave off unless the platform's
     # IoT Agent is configured to honour it; otherwise it is ignored.
     digital_twin_send_timestamp: bool = False
+    # Northbound aggregation. 0 = publish every reading as it arrives. N > 0 = one
+    # message per Device per N-second window aligned to the clock: each key is the
+    # mean of the window's samples and TimeInstant is the window end. Raw readings
+    # stay in the local store either way.
+    digital_twin_publish_interval_s: int = Field(default=0, ge=0, le=3600)
+    # SDM attributes (or platform keys) sent as the window's last value instead of
+    # the mean: running counters, where a mean across a rollover is meaningless.
+    digital_twin_last_value_attributes: list[str] = []
 
     # Security
     production: bool = False  # when True, reject insecure default secrets at startup
@@ -203,6 +211,8 @@ class Settings(BaseSettings):
                 "entity_type": self.digital_twin_entity_type,
                 "devices": [d.model_dump() for d in self.digital_twin_devices],
                 "send_timestamp": self.digital_twin_send_timestamp,
+                "publish_interval_s": self.digital_twin_publish_interval_s,
+                "last_value_attributes": list(self.digital_twin_last_value_attributes),
             },
             "security": {
                 "jwt_secret": None,  # secret: set via DATAK_JWT_SECRET
