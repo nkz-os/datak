@@ -15,6 +15,8 @@ class DeviceMeasurement(BaseModel):
     key: str
     sdmAttribute: str = ""  # noqa: N815 - name fixed by the platform JSON
     unit: str = ""
+    # statistic -> MQTT key, e.g. {"mean": "t", "min": "tMin"}; empty = legacy single value
+    statistics: dict[str, str] = {}
 
 
 class DeviceRoute(BaseModel):
@@ -24,6 +26,8 @@ class DeviceRoute(BaseModel):
     name: str = ""
     topic: str
     measurements: list[DeviceMeasurement] = []
+    # Window length chosen on the platform; None = use the gateway-wide interval.
+    windowSeconds: int | None = Field(default=None, ge=60, le=86400)  # noqa: N815
 
 
 class Settings(BaseSettings):

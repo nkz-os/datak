@@ -8,6 +8,7 @@ FIWARE topic format (/<apikey>/<device_id>/attrs).
 import asyncio
 import contextlib
 import json
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -29,6 +30,16 @@ _BASE_BACKOFF = 5
 # Seconds a window stays open past its end, so readings polled right at the
 # boundary still land in it.
 _WINDOW_GRACE_S = 3.0
+
+
+@dataclass(frozen=True)
+class Route:
+    """Where a reading goes and what is sent for it."""
+
+    topic: str
+    key: str
+    statistics: dict[str, str] = field(default_factory=dict)  # empty = legacy single value
+    window_s: int | None = None  # per-Device window; None = gateway-wide interval
 
 
 def _iso_utc(ts: datetime) -> str:
@@ -133,23 +144,26 @@ class CloudSync:
         if not settings.digital_twin_enabled:
             return False
 
-        windowed = settings.digital_twin_publish_interval_s > 0
-        # Windows keep accumulating while disconnected; what cannot be sent at
-        # the window end is dropped there (raw readings stay local).
-        if not windowed and (not self._connected or self._client is None):
-            return False
-
         final_attr = attribute or _get_sdm_attribute(sensor_name)
         route = self._resolve_route(sensor_name, entity_id, final_attr)
         if route is None:
             return False
-        topic, key = route
 
-        if windowed:
+        interval = route.window_s or settings.digital_twin_publish_interval_s
+        # Windows keep accumulating while disconnected; what cannot be sent at
+        # the window end is dropped there (raw readings stay local).
+        if interval <= 0 and (not self._connected or self._client is None):
+            return False
+
+        if interval > 0:
             self._ensure_window()
             assert self._window is not None
-            return self._window.add(topic, key, value, timestamp, attribute=final_attr)
+            return self._window.add(
+                route.topic, route.key, value, timestamp, attribute=final_attr,
+                interval_s=interval, outputs=route.statistics or None,
+            )
 
+        topic, key = route.topic, route.key
         body: dict[str, Any] = {key: value}
         if settings.digital_twin_send_timestamp:
             body["TimeInstant"] = _iso_utc(timestamp)
@@ -170,9 +184,11 @@ class CloudSync:
             return False
 
     def _ensure_window(self) -> None:
-        interval = settings.digital_twin_publish_interval_s
-        if self._window is None or self._window.interval_s != interval:
-            self._window = WindowAggregator(interval, settings.digital_twin_last_value_attributes)
+        if self._window is None:
+            self._window = WindowAggregator(
+                settings.digital_twin_publish_interval_s,
+                settings.digital_twin_last_value_attributes,
+            )
         if self._flush_task is None or self._flush_task.done():
             self._flush_task = asyncio.create_task(self._flush_loop())
 
@@ -221,8 +237,8 @@ class CloudSync:
 
     def _resolve_route(
         self, sensor_name: str, entity_id: str | None, attribute: str
-    ) -> tuple[str, str] | None:
-        """Return (topic, payload key) for a reading, or None if it must not be sent.
+    ) -> Route | None:
+        """Return the Route for a reading, or None if it must not be sent.
 
         Without a configured device list the legacy single topic is used with the
         attribute as key. With a device list, the broker ACL only accepts the
@@ -231,12 +247,12 @@ class CloudSync:
         devices = settings.digital_twin_devices
         if not devices:
             topic = settings.digital_twin_topic
-            return (topic, attribute) if topic else None
+            return Route(topic, attribute) if topic else None
 
         if not entity_id:
             topic = settings.digital_twin_topic
             if topic:
-                return topic, attribute
+                return Route(topic, attribute)
             self._skip_once(
                 ("none", sensor_name),
                 "Sensor skipped: no platform device assigned",
@@ -256,11 +272,12 @@ class CloudSync:
             )
             return None
 
-        keys = {m.key for m in device.measurements}
-        key = next((m.key for m in device.measurements if m.sdmAttribute == attribute), None)
-        if key is None and attribute in keys:
-            key = attribute
-        if key is None:
+        measurement = next(
+            (m for m in device.measurements if m.sdmAttribute == attribute), None
+        )
+        if measurement is None:
+            measurement = next((m for m in device.measurements if m.key == attribute), None)
+        if measurement is None:
             self._skip_once(
                 ("attr", device.externalId, attribute),
                 "Reading skipped: device has no such measurement",
@@ -269,7 +286,9 @@ class CloudSync:
                 attribute=attribute,
             )
             return None
-        return device.topic, key
+        return Route(
+            device.topic, measurement.key, dict(measurement.statistics), device.windowSeconds
+        )
 
     def _skip_once(self, token: tuple[str, ...], event: str, **ctx: Any) -> None:
         """Log a skipped reading once per cause, not once per reading."""

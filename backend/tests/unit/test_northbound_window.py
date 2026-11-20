@@ -93,7 +93,56 @@ def test_reading_for_a_closed_window_is_dropped_not_sent_twice():
 
 def test_interval_must_be_positive():
     with pytest.raises(ValueError):
-        WindowAggregator(0)
+        WindowAggregator(0).add(TOPIC_A, "temp", 1.0, at(1))
+    with pytest.raises(ValueError):
+        WindowAggregator(60).add(TOPIC_A, "temp", 1.0, at(1), interval_s=-5)
+
+
+def test_statistics_over_a_window():
+    w = WindowAggregator(60)
+    outputs = {"mean": "t", "min": "tMin", "max": "tMax", "stddev": "tStdDev"}
+    for i, v in enumerate((1, 2, 3, 4)):
+        w.add(TOPIC_A, "t", v, at(i), outputs=outputs)
+    [closed] = w.pop_closed(at(60))
+    assert closed.values == {"t": 2.5, "tMin": 1.0, "tMax": 4.0, "tStdDev": 1.291}
+
+
+def test_stddev_needs_two_samples():
+    w = WindowAggregator(60)
+    w.add(TOPIC_A, "t", 5.0, at(1), outputs={"mean": "t", "stddev": "tStdDev"})
+    [closed] = w.pop_closed(at(60))
+    assert closed.values == {"t": 5.0}
+
+
+def test_sum_and_last_by_timestamp():
+    w = WindowAggregator(60)
+    w.add(TOPIC_R, "rain", 0.2, at(1), outputs={"sum": "rain"})
+    w.add(TOPIC_R, "rain", 0.4, at(2), outputs={"sum": "rain"})
+    w.add(TOPIC_A, "c", 9.0, at(30), outputs={"last": "c"})
+    w.add(TOPIC_A, "c", 7.0, at(10), outputs={"last": "c"})  # older, arrives later
+    closed = {c.topic: c.values for c in w.pop_closed(at(60))}
+    assert closed == {TOPIC_R: {"rain": 0.6}, TOPIC_A: {"c": 9.0}}
+
+
+def test_series_with_only_invalid_samples_emits_nothing():
+    w = WindowAggregator(60)
+    w.add(TOPIC_A, "t", float("nan"), at(1), outputs={"mean": "t", "min": "tMin"})
+    assert w.pop_closed(at(60)) == []
+
+
+def test_topics_with_different_intervals_close_independently():
+    w = WindowAggregator()
+    w.add(TOPIC_A, "t", 1.0, at(10), interval_s=60)
+    w.add(TOPIC_R, "r", 2.0, at(10), interval_s=600)
+    [closed] = w.pop_closed(at(60))
+    assert closed.topic == TOPIC_A
+    # the 60 s topic closed minute 1; the 600 s topic is not late at minute 1:30
+    assert w.add(TOPIC_R, "r", 3.0, at(90), interval_s=600) is True
+    assert w.late_dropped == 0
+    [closed] = w.pop_closed(at(600))
+    assert closed.topic == TOPIC_R
+    assert closed.values == {"r": 2.5}
+    assert closed.end == at(600)
 
 
 # ---- cloud sync -------------------------------------------------------------
@@ -172,6 +221,36 @@ async def test_close_drops_open_windows_and_stops_the_flusher(sync):
     await sync.close()
     assert sync._flush_task is None
     assert sync._window.pop_closed(at(1000)) == []
+
+
+async def test_device_window_and_statistics_with_interval_off(sync, monkeypatch):
+    monkeypatch.setattr(cs.settings, "digital_twin_publish_interval_s", 0)
+    route = DeviceRoute(externalId="dev-s", topic=TOPIC_A, windowSeconds=60, measurements=[
+        {"key": "t", "sdmAttribute": "airTemperature", "statistics": {"mean": "t", "min": "tMin"}},
+    ])
+    monkeypatch.setattr(cs.settings, "digital_twin_devices", [route])
+    assert await _send(sync, "airTemperature", 10.0, at(1), twin="dev-s") is True
+    await _send(sync, "airTemperature", 14.0, at(3), twin="dev-s")
+    sync._client.publish.assert_not_called()
+    assert await sync.flush_closed(at(70)) == 1
+    topic, payload = sync._client.publish.call_args.args
+    assert topic == TOPIC_A
+    assert json.loads(payload) == {"t": 12.0, "tMin": 10.0, "TimeInstant": "2026-01-01T12:01:00Z"}
+
+
+def test_device_route_parses_statistics_and_window():
+    r = DeviceRoute.model_validate({
+        "externalId": "dev-s", "topic": TOPIC_A, "windowSeconds": 300,
+        "measurements": [{"key": "t", "sdmAttribute": "airTemperature", "unit": "CEL",
+                          "statistics": {"mean": "t", "max": "tMax"}}],
+    })
+    assert r.windowSeconds == 300
+    assert r.measurements[0].statistics == {"mean": "t", "max": "tMax"}
+    legacy = DeviceRoute.model_validate({"externalId": "x", "topic": TOPIC_A,
+                                         "measurements": [{"key": "t"}]})
+    assert legacy.windowSeconds is None and legacy.measurements[0].statistics == {}
+    with pytest.raises(ValueError):
+        DeviceRoute.model_validate({"externalId": "x", "topic": TOPIC_A, "windowSeconds": 30})
 
 
 def test_settings_read_window_options_from_yaml(tmp_path):
