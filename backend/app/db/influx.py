@@ -14,6 +14,24 @@ logger = structlog.get_logger()
 settings = get_settings()
 
 
+
+_STATS = ("mean", "min", "max", "stddev", "count")
+
+
+def parse_register_statistics(tables: Any) -> dict[str | None, dict[str, float | None]]:
+    """Fold the multi-yield statistics query into {register_name: {stat: value}}."""
+    out: dict[str | None, dict[str, float | None]] = {}
+    for table in tables:
+        for record in table.records:
+            stat = record.values.get("result")
+            if stat not in _STATS:
+                continue
+            register = record.values.get("register_name")
+            entry = out.setdefault(register, dict.fromkeys(_STATS))
+            entry[stat] = record.get_value()
+    return out
+
+
 class InfluxDBClient:
     """
     Async InfluxDB client for storing sensor time-series data.
@@ -222,6 +240,7 @@ class InfluxDBClient:
                         "time": record.get_time(),
                         "value": record.get_value(),
                         "sensor_name": record.values.get("sensor_name"),
+                        "register_name": record.values.get("register_name"),
                     })
 
             return results
@@ -284,6 +303,44 @@ class InfluxDBClient:
             self._log.error("Statistics query failed", error=str(e))
             return {}
 
+    async def query_register_statistics(
+        self,
+        sensor_name: str,
+        start: str,
+        stop: str,
+    ) -> dict[str | None, dict[str, float | None]]:
+        """Statistics of a sensor over a time range, one entry per register.
+
+        Keyed by the ``register_name`` tag (None for single-register readings,
+        which carry no register tag). Registers are never mixed: each one is a
+        different variable with its own unit.
+        """
+        if not self._client:
+            return {}
+
+        try:
+            query_api = self._client.query_api()
+            flux = f'''
+            data = from(bucket: "{settings.influxdb_bucket}")
+                |> range(start: {start}, stop: {stop})
+                |> filter(fn: (r) => r["_measurement"] == "sensor_reading")
+                |> filter(fn: (r) => r["sensor_name"] == "{sensor_name}")
+                |> filter(fn: (r) => r["_field"] == "value")
+                |> group(columns: ["register_name"])
+
+            data |> mean() |> yield(name: "mean")
+            data |> min() |> yield(name: "min")
+            data |> max() |> yield(name: "max")
+            data |> stddev() |> yield(name: "stddev")
+            data |> count() |> yield(name: "count")
+            '''
+            tables = await query_api.query(flux, org=settings.influxdb_org)
+            return parse_register_statistics(tables)
+
+        except Exception as e:
+            self._log.error("Register statistics query failed", error=str(e), sensor_name=sensor_name)
+            return {}
+
     async def export_data(
         self,
         sensor_names: list[str],
@@ -305,14 +362,18 @@ class InfluxDBClient:
             # Format sensor names for Flux set
             sensors_set = "[" + ", ".join(f'"{s}"' for s in sensor_names) + "]"
 
+            # One column per sensor and register: a multi-register sensor holds
+            # several variables, and pivoting on the sensor alone overwrote them.
             flux = f'''
             from(bucket: "{settings.influxdb_bucket}")
                 |> range(start: time(v: "{start}"), stop: time(v: "{stop}"))
                 |> filter(fn: (r) => r["_measurement"] == "sensor_reading")
                 |> filter(fn: (r) => contains(value: r["sensor_name"], set: {sensors_set}))
                 |> filter(fn: (r) => r["_field"] == "value")
-                |> pivot(rowKey:["_time"], columnKey: ["sensor_name"], valueColumn: "_value")
-                |> drop(columns: ["_start", "_stop", "_measurement", "_field"])
+                |> map(fn: (r) => ({{r with column: if exists r.register_name
+                    then r.sensor_name + " / " + r.register_name else r.sensor_name}}))
+                |> group()
+                |> pivot(rowKey:["_time"], columnKey: ["column"], valueColumn: "_value")
                 |> sort(columns: ["_time"])
             '''
 
@@ -322,28 +383,25 @@ class InfluxDBClient:
             if not tables:
                 return ""
 
-            # Use csv module to generate CSV string
             import csv
             import io
 
+            records = [record for table in tables for record in table.records]
+            columns = sorted({
+                key for record in records for key in record.values
+                if key in sensor_names or any(key.startswith(f"{n} / ") for n in sensor_names)
+            })
+
             output = io.StringIO()
-
-            # Fields: time, sensor1, sensor2...
-            fieldnames = ["time", *sorted(sensor_names)]
-
-            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer = csv.DictWriter(output, fieldnames=["time", *columns])
             writer.writeheader()
-
-            for table in tables:
-                for record in table.records:
-                    row = {"time": record.get_time().isoformat()}
-                    # The record values contain keys for each sensor_name due to pivot
-                    for sensor in sensor_names:
-                        val = record.values.get(sensor)
-                        if val is not None:
-                            row[sensor] = val
-
-                    writer.writerow(row)
+            for record in records:
+                row: dict[str, Any] = {"time": record.get_time().isoformat()}
+                for column in columns:
+                    val = record.values.get(column)
+                    if val is not None:
+                        row[column] = val
+                writer.writerow(row)
 
             return output.getvalue()
 

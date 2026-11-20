@@ -5,7 +5,7 @@ import contextlib
 import csv
 import gzip
 import shutil
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -19,6 +19,68 @@ from app.models.sensor import Sensor
 
 logger = structlog.get_logger()
 settings = get_settings()
+
+
+
+REPORT_FIELDS = ["timestamp", "window_start", "sensor_id", "sensor_name", "register_name", "unit",
+                 "interval", "count", "mean", "min", "max", "stddev"]
+DAILY_FIELDS = ["date", "sensor_id", "sensor_name", "register_name", "unit",
+                "count", "mean", "min", "max", "stddev"]
+REPORT_SETTLE = timedelta(seconds=15)
+
+
+def _iso(ts: datetime) -> str:
+    """UTC timestamp with an explicit Z (the old reports wrote naive times)."""
+    ts = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def window_bounds(now: datetime, interval: timedelta) -> tuple[datetime, datetime]:
+    """The latest closed window [start, end) at ``now``, aligned to the UTC clock."""
+    seconds = int(interval.total_seconds())
+    ts = int((now if now.tzinfo else now.replace(tzinfo=UTC)).timestamp())
+    end = datetime.fromtimestamp(ts - ts % seconds, UTC)
+    return end - interval, end
+
+
+def _round(value: float | None) -> float | None:
+    return None if value is None else round(value, 4)
+
+
+def register_rows(
+    sensors: list[Sensor],
+    stats: dict[str, dict[str | None, dict[str, float | None]]],
+) -> list[dict[str, Any]]:
+    """One row per sensor and register that has readings, with the register's unit.
+
+    A register found in the data but no longer configured keeps its name with an
+    empty unit; readings without a register tag use the sensor's unit.
+    """
+    rows: list[dict[str, Any]] = []
+    for sensor in sensors:
+        units = {r.name: r.unit or "" for r in sensor.registers}
+        by_register = stats.get(sensor.name) or {}
+        for register in sorted(by_register, key=lambda r: (r is not None, r or "")):
+            st = by_register[register]
+            if not st.get("count"):
+                continue
+            rows.append({
+                "sensor_id": sensor.id,
+                "sensor_name": sensor.name,
+                "register_name": register or "",
+                "unit": units.get(register, "") if register else (sensor.unit or ""),
+                "count": int(st["count"] or 0),
+                "mean": _round(st.get("mean")),
+                "min": _round(st.get("min")),
+                "max": _round(st.get("max")),
+                "stddev": _round(st.get("stddev")),
+            })
+    return rows
+
+
+def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    df = pd.DataFrame(rows, columns=fields)
+    df.to_csv(path, index=False, quoting=csv.QUOTE_NONNUMERIC)
 
 
 class CSVReportGenerator:
@@ -63,88 +125,50 @@ class CSVReportGenerator:
     async def generate_report(
         self,
         interval: str = "5min",
-        lookback_minutes: int | None = None,
+        now: datetime | None = None,
     ) -> Path | None:
         """
-        Generate a statistical report for all sensors.
+        Write the statistics of the latest closed window of ``interval``.
 
-        Args:
-            interval: Aggregation window (1min, 5min, 10min, 1hour)
-            lookback_minutes: Time range to query (default: 2x interval)
+        The window is aligned to the clock, [end - interval, end) in UTC, so
+        consecutive reports neither overlap nor leave gaps. One row per sensor
+        and register, with the register's own unit. The file name carries the
+        window end, so writing the same window twice gives the same file.
 
         Returns:
-            Path to generated CSV file, or None if failed.
+            Path to the generated CSV file, or None if there was nothing to write.
         """
         if interval not in self.INTERVAL_MAP:
             self._log.error("Invalid interval", interval=interval)
             return None
 
-        if lookback_minutes is None:
-            # Default: look back 2x the interval
-            lookback_minutes = int(self.INTERVAL_MAP[interval].total_seconds() / 60) * 2
-
+        start, end = window_bounds(now or datetime.now(UTC), self.INTERVAL_MAP[interval])
         try:
-            # Get active sensors
-            async with async_session_factory() as session:
-                from sqlalchemy import select
-                result = await session.execute(
-                    select(Sensor)
-                    .where(Sensor.is_active == True)  # noqa: E712
-                    .where(Sensor.deleted_at == None)  # noqa: E711
-                )
-                sensors = list(result.scalars().all())
-
+            sensors = await self._load_sensors(active_only=True)
             if not sensors:
                 self._log.warning("No active sensors found")
                 return None
 
-            # Query statistics for each sensor
-            now = datetime.utcnow()
-            now - timedelta(minutes=lookback_minutes)
-
-            rows: list[dict[str, Any]] = []
-
-            for sensor in sensors:
-                stats = await influx_client.query_statistics(
-                    sensor_name=sensor.name,
-                    start=f"-{lookback_minutes}m",
-                    stop="now()",
+            stats = {
+                sensor.name: await influx_client.query_register_statistics(
+                    sensor_name=sensor.name, start=_iso(start), stop=_iso(end),
                 )
-
-                if stats.get("count"):
-                    rows.append({
-                        "timestamp": now.isoformat(),
-                        "sensor_id": sensor.id,
-                        "sensor_name": sensor.name,
-                        "unit": sensor.unit or "",
-                        "interval": interval,
-                        "count": stats.get("count"),
-                        "mean": round(stats.get("mean") or 0, 4),
-                        "min": round(stats.get("min") or 0, 4),
-                        "max": round(stats.get("max") or 0, 4),
-                        "stddev": round(stats.get("stddev") or 0, 4),
-                    })
-
+                for sensor in sensors
+            }
+            rows = [
+                {"timestamp": _iso(end), "window_start": _iso(start), **row,
+                 "interval": interval}
+                for row in register_rows(sensors, stats)
+            ]
             if not rows:
-                self._log.debug("No data to report")
+                self._log.debug("No data to report", interval=interval, window_end=_iso(end))
                 return None
 
-            # Generate filename
-            date_str = now.strftime("%Y-%m-%d")
-            time_str = now.strftime("%H%M")
-            filename = f"report_{interval}_{date_str}_{time_str}.csv"
+            filename = f"report_{interval}_{end.strftime('%Y-%m-%d_%H%M')}.csv"
             filepath = self._output_dir / filename
+            _write_csv(filepath, rows, REPORT_FIELDS)
 
-            # Write CSV
-            df = pd.DataFrame(rows)
-            df.to_csv(filepath, index=False, quoting=csv.QUOTE_NONNUMERIC)
-
-            self._log.info(
-                "Report generated",
-                file=filename,
-                sensors=len(rows),
-                interval=interval,
-            )
+            self._log.info("Report generated", file=filename, rows=len(rows), interval=interval)
             return filepath
 
         except Exception as e:
@@ -153,65 +177,47 @@ class CSVReportGenerator:
 
     async def generate_daily_summary(self, date: datetime | None = None) -> Path | None:
         """
-        Generate a daily summary report with all intervals.
+        Write the statistics of one UTC day, one row per sensor and register.
 
         Args:
-            date: Date to summarize (default: yesterday)
+            date: Day to summarize (default: yesterday, UTC)
         """
-        if date is None:
-            date = datetime.utcnow() - timedelta(days=1)
-
-        date_str = date.strftime("%Y-%m-%d")
-        start = f"{date_str}T00:00:00Z"
-        stop = f"{date_str}T23:59:59Z"
-
+        day = (date or datetime.now(UTC) - timedelta(days=1)).date()
+        start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+        end = start + timedelta(days=1)
         try:
-            # Get all sensors
-            async with async_session_factory() as session:
-                from sqlalchemy import select
-                result = await session.execute(select(Sensor))
-                sensors = list(result.scalars().all())
-
-            rows: list[dict[str, Any]] = []
-
-            for sensor in sensors:
-                # Query full day stats
-                data = await influx_client.query_sensor_data(
-                    sensor_name=sensor.name,
-                    start=start,
-                    stop=stop,
+            sensors = await self._load_sensors(active_only=False)
+            stats = {
+                sensor.name: await influx_client.query_register_statistics(
+                    sensor_name=sensor.name, start=_iso(start), stop=_iso(end),
                 )
-
-                if data:
-                    values = [d["value"] for d in data if d.get("value") is not None]
-                    if values:
-                        rows.append({
-                            "date": date_str,
-                            "sensor_id": sensor.id,
-                            "sensor_name": sensor.name,
-                            "unit": sensor.unit or "",
-                            "count": len(values),
-                            "mean": round(sum(values) / len(values), 4),
-                            "min": round(min(values), 4),
-                            "max": round(max(values), 4),
-                            "stddev": round(pd.Series(values).std(), 4) if len(values) > 1 else 0,
-                        })
-
+                for sensor in sensors
+            }
+            rows = [{"date": day.isoformat(), **row} for row in register_rows(sensors, stats)]
             if not rows:
                 return None
 
-            filename = f"daily_summary_{date_str}.csv"
-            filepath = self._output_dir / filename
+            filepath = self._output_dir / f"daily_summary_{day.isoformat()}.csv"
+            _write_csv(filepath, rows, DAILY_FIELDS)
 
-            df = pd.DataFrame(rows)
-            df.to_csv(filepath, index=False, quoting=csv.QUOTE_NONNUMERIC)
-
-            self._log.info("Daily summary generated", file=filename, sensors=len(rows))
+            self._log.info("Daily summary generated", file=filepath.name, rows=len(rows))
             return filepath
 
         except Exception as e:
             self._log.exception("Daily summary failed", error=str(e))
             return None
+
+    async def _load_sensors(self, active_only: bool) -> list[Sensor]:
+        async with async_session_factory() as session:
+            from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
+
+            query = select(Sensor).options(selectinload(Sensor.registers))
+            if active_only:
+                query = query.where(Sensor.is_active == True)  # noqa: E712
+            query = query.where(Sensor.deleted_at == None)  # noqa: E711
+            result = await session.execute(query)
+            return list(result.scalars().all())
 
     async def compress_old_files(self, days: int = 7) -> int:
         """Compress CSV files older than specified days."""
@@ -277,46 +283,33 @@ class CSVReportGenerator:
         return files[:limit]
 
     async def _generation_loop(self) -> None:
-        """Background task for periodic report generation."""
-        # Generate reports at different intervals
-        last_1min = datetime.utcnow()
-        last_5min = datetime.utcnow()
-        last_1hour = datetime.utcnow()
-        last_daily = datetime.utcnow().date()
+        """Write each interval's report once its clock-aligned window has closed."""
+        last_end: dict[str, datetime] = {}
+        last_daily = datetime.now(UTC).date()
 
         while self._running:
             try:
-                now = datetime.utcnow()
+                # Readings reach InfluxDB through a buffer: wait a little past
+                # the window end so the last seconds are in.
+                now = datetime.now(UTC) - REPORT_SETTLE
+                for interval in ("1min", "5min", "1hour"):
+                    _, end = window_bounds(now, self.INTERVAL_MAP[interval])
+                    if last_end.get(interval) == end:
+                        continue
+                    await self.generate_report(interval, now=now)
+                    last_end[interval] = end
+                    if interval == "1hour":
+                        await self.compress_old_files()
+                        await self.cleanup_old_files()
 
-                # 1-minute reports
-                if (now - last_1min).total_seconds() >= 60:
-                    await self.generate_report("1min")
-                    last_1min = now
-
-                # 5-minute reports
-                if (now - last_5min).total_seconds() >= 300:
-                    await self.generate_report("5min")
-                    last_5min = now
-
-                # Hourly reports
-                if (now - last_1hour).total_seconds() >= 3600:
-                    await self.generate_report("1hour")
-                    last_1hour = now
-
-                    # Also run maintenance tasks hourly
-                    await self.compress_old_files()
-                    await self.cleanup_old_files()
-
-                # Daily summary (at midnight)
                 if now.date() > last_daily:
-                    await self.generate_daily_summary()
+                    await self.generate_daily_summary(now - timedelta(days=1))
                     last_daily = now.date()
 
             except Exception as e:
                 self._log.error("Generation loop error", error=str(e))
 
-            # Sleep for 30 seconds between checks
-            await asyncio.sleep(30)
+            await asyncio.sleep(10)
 
 
 # Global instance
