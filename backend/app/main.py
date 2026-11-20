@@ -4,6 +4,8 @@ DaTaK Gateway - Main FastAPI Application Entry Point.
 This is the main entry point for the IoT Edge Gateway service.
 """
 
+import logging
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -16,6 +18,8 @@ from app.api.routes import auth, automation, config, export, report_jobs, sensor
 from app.config import get_settings
 from app.db.influx import influx_client
 from app.db.session import close_db, init_db
+from app.drivers import modbus_bus
+from app.drivers.modbus_bus import BusSettings
 from app.services.automation import automation_engine
 from app.services.buffer import buffer_queue
 from app.services.cloud_sync import cloud_sync
@@ -23,6 +27,31 @@ from app.services.command_listener import command_listener
 from app.services.csv_engine import csv_generator
 from app.services.orchestrator import orchestrator
 from app.services.telemetry_pipeline import telemetry_pipeline
+
+settings = get_settings()
+
+
+def configure_stdlib_logging(level_name: str) -> int:
+    """Route structlog's stdlib loggers to stdout at the configured level.
+
+    Without this the root logger stays at WARNING and every ``info`` event
+    (startup, sensor registration, bus feasibility, health changes) is dropped.
+    """
+    level = logging.getLevelName(level_name.upper())
+    if not isinstance(level, int):
+        level = logging.INFO
+    logging.basicConfig(level=level, format="%(message)s", stream=sys.stdout, force=True)
+    # Third-party chatter stays at WARNING; our own modules follow the setting.
+    for noisy in ("pymodbus", "httpx", "httpcore", "aiosqlite", "urllib3"):
+        logging.getLogger(noisy).setLevel(max(level, logging.WARNING))
+    if level != logging.getLevelName(level_name.upper()):
+        logging.getLogger(__name__).warning(
+            "Unknown log_level %r, using INFO", level_name
+        )
+    return level
+
+
+configure_stdlib_logging(settings.log_level)
 
 # Configure structured logging
 structlog.configure(
@@ -42,7 +71,6 @@ structlog.configure(
 )
 
 logger = structlog.get_logger()
-settings = get_settings()
 
 
 @asynccontextmanager
@@ -66,6 +94,23 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("InfluxDB connected")
     else:
         logger.warning("InfluxDB not available, running in buffer mode")
+
+    # Modbus bus timing contract: must be set before any sensor is added.
+    modbus_bus.configure(
+        BusSettings(
+            round_budget_s=settings.modbus_round_budget_ms / 1000,
+            default_transaction_timeout_s=settings.modbus_transaction_timeout_ms / 1000,
+            quarantine_max_s=float(settings.modbus_quarantine_max_s),
+            gateway_settle_s=settings.modbus_gateway_settle_ms / 1000,
+        )
+    )
+    logger.info(
+        "Modbus bus settings",
+        round_budget_ms=settings.modbus_round_budget_ms,
+        transaction_timeout_ms=settings.modbus_transaction_timeout_ms,
+        quarantine_max_s=settings.modbus_quarantine_max_s,
+        gateway_settle_ms=settings.modbus_gateway_settle_ms,
+    )
 
     # Start services
     await orchestrator.start()
@@ -153,7 +198,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     await automation_engine.stop()
     await command_listener.stop()
     await telemetry_pipeline.stop()
-    await cloud_sync.stop()
+    await cloud_sync.close()
     await csv_generator.stop()
     await buffer_queue.stop()
     await orchestrator.stop()
