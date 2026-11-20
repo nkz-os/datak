@@ -198,7 +198,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     await automation_engine.stop()
     await command_listener.stop()
     await telemetry_pipeline.stop()
-    await cloud_sync.stop()
+    await cloud_sync.close()
     await csv_generator.stop()
     await buffer_queue.stop()
     await orchestrator.stop()
