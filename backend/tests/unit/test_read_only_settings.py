@@ -22,9 +22,9 @@ def test_default_is_empty() -> None:
 
 
 def test_loaded_from_yaml(tmp_path: Path) -> None:
-    path = _write(tmp_path, "modbus:\n  read_only_endpoints:\n    - plc.example:502\n    - 10.0.0.9:1502\n")
+    path = _write(tmp_path, "modbus:\n  read_only_endpoints:\n    - plc.example:502\n    - plc2.example:1502\n")
     settings = Settings.from_yaml(path)
-    assert settings.modbus_read_only_endpoints == ["plc.example:502", "10.0.0.9:1502"]
+    assert settings.modbus_read_only_endpoints == ["plc.example:502", "plc2.example:1502"]
 
 
 def test_empty_list_in_yaml_is_accepted(tmp_path: Path) -> None:
