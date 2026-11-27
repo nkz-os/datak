@@ -2,9 +2,13 @@ import uuid
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 
-from app.api.deps import CurrentUser
+from app.api.deps import CurrentUser, DbSession
+from app.drivers.modbus_bus import read_only_requested
+from app.models.sensor import Sensor
 from app.services.automation import AutomationRule, automation_engine
+from app.services.orchestrator import orchestrator
 
 router = APIRouter(prefix="/automation", tags=["Automation"])
 
@@ -44,8 +48,20 @@ async def get_rules(_user: CurrentUser) -> list[RuleResponse]:
     ]
 
 @router.post("/rules", response_model=RuleResponse)
-async def create_rule(rule: RuleCreate, _user: CurrentUser) -> RuleResponse:
-    """Create a new automation rule."""
+async def create_rule(rule: RuleCreate, _user: CurrentUser, db: DbSession) -> RuleResponse:
+    """Create a new automation rule (refused when its target can never be written)."""
+    # Two views of the same fact: the stored sensor row (works for inactive
+    # sensors) and the running driver (also sees a bus locked by a neighbour).
+    row = await db.execute(select(Sensor).where(Sensor.id == rule.target_sensor_id))
+    target = row.scalar_one_or_none()
+    if orchestrator.is_read_only(rule.target_sensor_id) or (
+        target is not None and read_only_requested(target.connection_params)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Target sensor {rule.target_sensor_id} is read-only; "
+            "an automation rule cannot write to it",
+        )
     rule_id = str(uuid.uuid4())
     new_rule = AutomationRule(
         rule_id=rule_id,

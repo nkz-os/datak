@@ -111,6 +111,8 @@ class Settings(BaseSettings):
     modbus_transaction_timeout_ms: int = 250  # default per-transaction deadline
     modbus_quarantine_max_s: int = 60  # backoff cap for unresponsive slaves
     modbus_gateway_settle_ms: int = 0  # pause after a failed transaction (slow gateways)
+    # "host:port" of Modbus-TCP endpoints DaTaK must never write to (see modbus_bus.py)
+    modbus_read_only_endpoints: list[str] = Field(default_factory=list)
 
     @field_validator("data_dir", "reports_output_dir", mode="before")
     @classmethod
@@ -241,6 +243,7 @@ class Settings(BaseSettings):
                 "transaction_timeout_ms": self.modbus_transaction_timeout_ms,
                 "quarantine_max_s": self.modbus_quarantine_max_s,
                 "gateway_settle_ms": self.modbus_gateway_settle_ms,
+                "read_only_endpoints": list(self.modbus_read_only_endpoints),
             },
         }
 

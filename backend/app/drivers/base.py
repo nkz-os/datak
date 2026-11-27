@@ -36,6 +36,12 @@ class WriteError(DriverError):
     pass
 
 
+class ReadOnlyEndpointError(WriteError):
+    """A write was refused because the sensor or its endpoint is read-only."""
+
+    pass
+
+
 class BaseDriver(ABC):
     """
     Abstract base class for async protocol drivers.

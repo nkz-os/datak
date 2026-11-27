@@ -10,6 +10,7 @@ from sqlalchemy import select
 from app.api.deps import CurrentUser, DbSession, OperatorUser
 from app.core.formula import validate_formula
 from app.core.sdm import get_sdm_attribute
+from app.drivers.base import ReadOnlyEndpointError
 from app.models.audit import AuditAction, AuditLog
 from app.models.sensor import Sensor, SensorProtocol, SensorRegister, SensorStatus
 from app.services.orchestrator import orchestrator
@@ -488,6 +489,8 @@ async def write_to_sensor(
             return {"message": "Write successful"}
         else:
             raise HTTPException(status_code=500, detail="Write failed (driver returned False)")
+    except ReadOnlyEndpointError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:

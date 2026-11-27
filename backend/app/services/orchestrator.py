@@ -7,7 +7,7 @@ from typing import Any
 import structlog
 
 from app.core.formula import FormulaError, evaluate_formula
-from app.drivers.base import BaseDriver
+from app.drivers.base import BaseDriver, ReadOnlyEndpointError
 from app.drivers.canbus import CANDriver
 from app.drivers.modbus import ModbusDriver
 from app.drivers.mqtt import MQTTDriver
@@ -200,10 +200,18 @@ class DriverOrchestrator:
 
         try:
             return await driver.write(value)
+        except ReadOnlyEndpointError:
+            # The driver already logged the refusal (once); callers map it to 409.
+            raise
         except Exception as e:
             self._log.error("Write failed", sensor_id=sensor_id, error=str(e))
             raise
 
+
+    def is_read_only(self, sensor_id: int) -> bool:
+        """True when a running driver for this sensor refuses writes."""
+        driver = self._drivers.get(sensor_id)
+        return bool(getattr(driver, "read_only", False))
 
     def get_status(self, sensor_id: int) -> dict[str, Any]:
         """Get current status of a sensor."""

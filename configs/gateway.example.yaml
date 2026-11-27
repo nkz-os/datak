@@ -118,6 +118,9 @@ modbus:
                                # (per sensor: connection_params.transaction_timeout_ms)
   quarantine_max_s: 60         # max backoff between probes of a dead slave
   gateway_settle_ms: 0         # pause after a failed transaction (see note)
+  read_only_endpoints: []      # "host:port" list. DaTaK can never write to these
+                               # Modbus-TCP endpoints (also per sensor:
+                               # connection_params.read_only: true)
 # NOTE: a Modbus-TCP->RTU gateway (e.g. EBYTE) has its own serial response
 # timeout. Preferably set it SHORTER than transaction_timeout_ms. If it cannot
 # be changed, set gateway_settle_ms >= gateway timeout - transaction_timeout_ms,

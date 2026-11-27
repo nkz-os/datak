@@ -10,6 +10,8 @@ Per-sensor ``connection_params``:
     host / port (TCP) or port / baudrate / parity / stopbits / bytesize (RTU)
     slave_id
     transaction_timeout_ms   optional, default from ``modbus.transaction_timeout_ms``
+    read_only                optional; when set (anything but absent/false/0) the
+                             sensor and its whole bus can never be written to
 
 ``poll_interval_ms`` and ``retry_count`` (consecutive failed polls before
 quarantine) come from the sensor row. ``timeout_ms`` is not used by Modbus
@@ -24,8 +26,19 @@ from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient
 from pymodbus.exceptions import ConnectionException, ModbusException
 
 from app.drivers import modbus_bus
-from app.drivers.base import BaseDriver, ConnectionError, ReadError, WriteError
-from app.drivers.modbus_bus import BusConnectionError, BusScheduler, SensorHealth
+from app.drivers.base import (
+    BaseDriver,
+    ConnectionError,
+    ReadError,
+    ReadOnlyEndpointError,
+    WriteError,
+)
+from app.drivers.modbus_bus import (
+    BusConnectionError,
+    BusScheduler,
+    SensorHealth,
+    read_only_requested,
+)
 
 # Sentinel to group contiguous registers for batch reading
 _MAX_GAP = 16  # max gap between registers to batch them together
@@ -72,6 +85,10 @@ class ModbusDriver(BaseDriver):
             if float(tx_ms) <= 0:
                 raise ValueError(f"transaction_timeout_ms must be > 0, got {tx_ms}")
             self._tx_timeout_override_s = float(tx_ms) / 1000.0
+
+        # Fails towards read-only (see modbus_bus.read_only_requested).
+        self._sensor_read_only = read_only_requested(config)
+        self._refusal_logged = False
 
         # Multi-register support
         self._registers: list[dict[str, Any]] = registers or []
@@ -217,7 +234,9 @@ class ModbusDriver(BaseDriver):
                         f"{key} already open with line settings {existing}; "
                         f"sensor requests {line}. All slaves on one RS485 bus must share them."
                     )
-            bus = modbus_bus.get_or_create_bus(key, factory)
+            bus = modbus_bus.get_or_create_bus(
+                key, factory, read_only=self._sensor_read_only
+            )
             if line is not None:
                 _SERIAL_LINE_SETTINGS[key] = line
         except ConnectionError:
@@ -420,9 +439,10 @@ class ModbusDriver(BaseDriver):
         method_name = methods.get(reg_type)
         if method_name is None:
             raise ReadError(f"Unknown register type: {reg_type}")
-        method = getattr(self._client, method_name)
+        client = self._bus.client if self._bus is not None else self._client
+        method = getattr(client, method_name)
 
-        modbus_bus.set_response_timeout(self._client, self.transaction_timeout_s)
+        modbus_bus.set_response_timeout(client, self.transaction_timeout_s)
         result = await method(
             address=address, count=count, **_unit_kwarg(method, self.slave_id)
         )
@@ -438,8 +458,50 @@ class ModbusDriver(BaseDriver):
         """Update the register configuration (hot-reload)."""
         self._registers = registers
 
+    @property
+    def read_only(self) -> bool:
+        """True when this sensor, or the bus it sits on, must never be written."""
+        return self._write_refusal() is not None
+
+    def _endpoint_key(self) -> str | None:
+        if self._bus_key is not None:
+            return self._bus_key
+        try:
+            return self._bus_spec()[0]
+        except ConnectionError:
+            return None
+
+    def _write_refusal(self) -> str | None:
+        """Why a write must be refused, or None. Pure: no I/O."""
+        if self._sensor_read_only:
+            return "sensor is read-only"
+        key = self._endpoint_key()
+        if key is not None and (
+            modbus_bus.bus_is_locked(key)
+            or (self._bus is not None and self._bus.read_only)
+        ):
+            return "endpoint is read-only"
+        return None
+
     async def write(self, value: float) -> bool:
         """Write value to Modbus register (waits for the bus between rounds)."""
+        # First statement on purpose: nothing, not even a connection check or
+        # the bus lock, may run before the read-only decision.
+        refusal = self._write_refusal()
+        if refusal is not None:
+            endpoint = self._endpoint_key()
+            if not self._refusal_logged:
+                self._refusal_logged = True
+                self._log.warning(
+                    "Write refused",
+                    sensor_id=self.sensor_id,
+                    endpoint=endpoint,
+                    reason=refusal,
+                )
+            raise ReadOnlyEndpointError(
+                f"Write refused: {refusal} (sensor {self.sensor_id}, endpoint {endpoint})"
+            )
+
         if not self._client:
             raise WriteError("Not connected")
 

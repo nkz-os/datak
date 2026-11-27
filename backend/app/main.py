@@ -8,6 +8,7 @@ import logging
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastapi import FastAPI
@@ -53,6 +54,18 @@ def configure_stdlib_logging(level_name: str) -> int:
 
 configure_stdlib_logging(settings.log_level)
 
+
+def build_bus_settings(cfg: Any) -> BusSettings:
+    """Modbus bus contract from the gateway settings (invalid values fail startup)."""
+    return BusSettings(
+        round_budget_s=cfg.modbus_round_budget_ms / 1000,
+        default_transaction_timeout_s=cfg.modbus_transaction_timeout_ms / 1000,
+        quarantine_max_s=float(cfg.modbus_quarantine_max_s),
+        gateway_settle_s=cfg.modbus_gateway_settle_ms / 1000,
+        read_only_endpoints=tuple(cfg.modbus_read_only_endpoints),
+    )
+
+
 # Configure structured logging
 structlog.configure(
     processors=[
@@ -96,20 +109,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("InfluxDB not available, running in buffer mode")
 
     # Modbus bus timing contract: must be set before any sensor is added.
-    modbus_bus.configure(
-        BusSettings(
-            round_budget_s=settings.modbus_round_budget_ms / 1000,
-            default_transaction_timeout_s=settings.modbus_transaction_timeout_ms / 1000,
-            quarantine_max_s=float(settings.modbus_quarantine_max_s),
-            gateway_settle_s=settings.modbus_gateway_settle_ms / 1000,
-        )
-    )
+    modbus_bus.configure(build_bus_settings(settings))
     logger.info(
         "Modbus bus settings",
         round_budget_ms=settings.modbus_round_budget_ms,
         transaction_timeout_ms=settings.modbus_transaction_timeout_ms,
         quarantine_max_s=settings.modbus_quarantine_max_s,
         gateway_settle_ms=settings.modbus_gateway_settle_ms,
+        read_only_endpoints=list(settings.modbus_read_only_endpoints),
     )
 
     # Start services
