@@ -8,6 +8,7 @@ import logging
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastapi import FastAPI
@@ -53,6 +54,18 @@ def configure_stdlib_logging(level_name: str) -> int:
 
 configure_stdlib_logging(settings.log_level)
 
+
+def build_bus_settings(cfg: Any) -> BusSettings:
+    """Modbus bus contract from the gateway settings (invalid values fail startup)."""
+    return BusSettings(
+        round_budget_s=cfg.modbus_round_budget_ms / 1000,
+        default_transaction_timeout_s=cfg.modbus_transaction_timeout_ms / 1000,
+        quarantine_max_s=float(cfg.modbus_quarantine_max_s),
+        gateway_settle_s=cfg.modbus_gateway_settle_ms / 1000,
+        read_only_endpoints=tuple(cfg.modbus_read_only_endpoints),
+    )
+
+
 # Configure structured logging
 structlog.configure(
     processors=[
@@ -71,6 +84,58 @@ structlog.configure(
 )
 
 logger = structlog.get_logger()
+
+
+def describe_read_only(bus_settings: BusSettings) -> None:
+    """Log the effective read-only endpoints (canonical IP:port)."""
+    logger.info(
+        "Modbus read-only endpoints",
+        endpoints=list(bus_settings.read_only_endpoints),
+        addresses=sorted(f"{ip}:{port}" for ip, port in bus_settings.read_only_addresses),
+        note="TCP buses whose host is not an IP literal are locked while any read-only endpoint exists",
+    )
+
+
+async def load_active_sensors(session_factory: Any) -> int:
+    """Start a driver for every active sensor stored in the database.
+
+    Returns the number of sensors found.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from app.models.sensor import Sensor, SensorProtocol
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Sensor)
+            .options(selectinload(Sensor.registers))
+            .where(Sensor.is_active == True)  # noqa: E712
+            .where(Sensor.deleted_at == None)  # noqa: E711
+        )
+        sensors_list = result.scalars().all()
+
+        for sensor in sensors_list:
+            if sensor.protocol not in (SensorProtocol.VIRTUAL.value, SensorProtocol.VIRTUAL_OUTPUT.value):
+                register_configs = (
+                    [r.to_driver_config() for r in sensor.registers] if sensor.registers else None
+                )
+
+                await orchestrator.add_sensor(
+                    sensor_id=sensor.id,
+                    sensor_name=sensor.name,
+                    protocol=sensor.protocol,
+                    connection_params=sensor.connection_params,
+                    formula=sensor.data_formula,
+                    poll_interval_ms=sensor.poll_interval_ms,
+                    timeout_ms=sensor.timeout_ms,
+                    retry_count=sensor.retry_count,
+                    registers=register_configs,
+                    twin_entity_id=sensor.twin_entity_id,
+                )
+
+        logger.info("Loaded active sensors", count=len(sensors_list))
+        return len(sensors_list)
 
 
 @asynccontextmanager
@@ -96,20 +161,16 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("InfluxDB not available, running in buffer mode")
 
     # Modbus bus timing contract: must be set before any sensor is added.
-    modbus_bus.configure(
-        BusSettings(
-            round_budget_s=settings.modbus_round_budget_ms / 1000,
-            default_transaction_timeout_s=settings.modbus_transaction_timeout_ms / 1000,
-            quarantine_max_s=float(settings.modbus_quarantine_max_s),
-            gateway_settle_s=settings.modbus_gateway_settle_ms / 1000,
-        )
-    )
+    bus_settings = build_bus_settings(settings)
+    modbus_bus.configure(bus_settings)
+    describe_read_only(bus_settings)
     logger.info(
         "Modbus bus settings",
         round_budget_ms=settings.modbus_round_budget_ms,
         transaction_timeout_ms=settings.modbus_transaction_timeout_ms,
         quarantine_max_s=settings.modbus_quarantine_max_s,
         gateway_settle_ms=settings.modbus_gateway_settle_ms,
+        read_only_endpoints=list(settings.modbus_read_only_endpoints),
     )
 
     # Start services
@@ -140,54 +201,9 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("WebSocket callbacks registered")
 
     # Load existing active sensors and start their drivers
-    from sqlalchemy import select
-
-    from app.core.sdm import get_sdm_attribute
     from app.db.session import async_session_factory
-    from app.models.sensor import Sensor, SensorProtocol
 
-    async with async_session_factory() as session:
-        from sqlalchemy.orm import selectinload
-
-        result = await session.execute(
-            select(Sensor)
-            .options(selectinload(Sensor.registers))
-            .where(Sensor.is_active == True)  # noqa: E712
-            .where(Sensor.deleted_at == None)  # noqa: E711
-        )
-        sensors_list = result.scalars().all()
-
-        for sensor in sensors_list:
-            if sensor.protocol not in (SensorProtocol.VIRTUAL.value, SensorProtocol.VIRTUAL_OUTPUT.value):
-                register_configs = [
-                    {
-                        "id": r.id,
-                        "name": r.name,
-                        "address": r.address,
-                        "count": r.count,
-                        "register_type": r.register_type,
-                        "data_formula": r.data_formula,
-                        "unit": r.unit,
-                        "decimal_places": r.decimal_places,
-                        "twin_attribute": r.twin_attribute or get_sdm_attribute(r.name),
-                    }
-                    for r in sensor.registers
-                ] if sensor.registers else None
-
-                await orchestrator.add_sensor(
-                    sensor_id=sensor.id,
-                    sensor_name=sensor.name,
-                    protocol=sensor.protocol,
-                    connection_params=sensor.connection_params,
-                    formula=sensor.data_formula,
-                    poll_interval_ms=sensor.poll_interval_ms,
-                    timeout_ms=sensor.timeout_ms,
-                    retry_count=sensor.retry_count,
-                    registers=register_configs,
-                    twin_entity_id=sensor.twin_entity_id,
-                )
-
-        logger.info("Loaded active sensors", count=len(sensors_list))
+    await load_active_sensors(async_session_factory)
 
     yield
 

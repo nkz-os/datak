@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.config import get_settings
+from app.db.schema_upgrade import add_missing_register_columns
 from app.models.base import Base
 
 settings = get_settings()
@@ -34,6 +35,8 @@ async def init_db() -> None:
     """Initialize database tables."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all never alters an existing table: add newer columns (expand only).
+        await conn.run_sync(add_missing_register_columns)
 
     # Seed default admin user if not exists
     async with async_session_factory() as session:

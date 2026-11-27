@@ -10,6 +10,8 @@ Per-sensor ``connection_params``:
     host / port (TCP) or port / baudrate / parity / stopbits / bytesize (RTU)
     slave_id
     transaction_timeout_ms   optional, default from ``modbus.transaction_timeout_ms``
+    read_only                optional; when set (anything but absent/false/0) the
+                             sensor and its whole bus can never be written to
 
 ``poll_interval_ms`` and ``retry_count`` (consecutive failed polls before
 quarantine) come from the sensor row. ``timeout_ms`` is not used by Modbus
@@ -24,11 +26,26 @@ from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient
 from pymodbus.exceptions import ConnectionException, ModbusException
 
 from app.drivers import modbus_bus
-from app.drivers.base import BaseDriver, ConnectionError, ReadError, WriteError
-from app.drivers.modbus_bus import BusConnectionError, BusScheduler, SensorHealth
+from app.drivers.base import (
+    BaseDriver,
+    ConnectionError,
+    ReadError,
+    ReadOnlyEndpointError,
+    WriteError,
+)
+from app.drivers.modbus_bus import (
+    BusConnectionError,
+    BusScheduler,
+    SensorHealth,
+    read_only_requested,
+)
+from app.drivers.register_decode import NonFiniteValueError, decode_words
 
 # Sentinel to group contiguous registers for batch reading
 _MAX_GAP = 16  # max gap between registers to batch them together
+# Modbus protocol limits for ONE read transaction (FC1/2: bits, FC3/4: registers)
+_MAX_REGISTERS_PER_READ = 125
+_MAX_BITS_PER_READ = 2000
 
 # Serial line settings each open RTU bus was created with (port -> settings).
 _SERIAL_LINE_SETTINGS: dict[str, tuple[int, str, int, int]] = {}
@@ -72,6 +89,11 @@ class ModbusDriver(BaseDriver):
             if float(tx_ms) <= 0:
                 raise ValueError(f"transaction_timeout_ms must be > 0, got {tx_ms}")
             self._tx_timeout_override_s = float(tx_ms) / 1000.0
+
+        # Fails towards read-only (see modbus_bus.read_only_requested).
+        self._sensor_read_only = read_only_requested(config)
+        self._refusal_logged = False
+        self._nonfinite_warned: set[str] = set()  # register names currently non-finite
 
         # Multi-register support
         self._registers: list[dict[str, Any]] = registers or []
@@ -217,7 +239,9 @@ class ModbusDriver(BaseDriver):
                         f"{key} already open with line settings {existing}; "
                         f"sensor requests {line}. All slaves on one RS485 bus must share them."
                     )
-            bus = modbus_bus.get_or_create_bus(key, factory)
+            bus = modbus_bus.get_or_create_bus(
+                key, factory, read_only=self._sensor_read_only
+            )
             if line is not None:
                 _SERIAL_LINE_SETTINGS[key] = line
         except ConnectionError:
@@ -328,18 +352,34 @@ class ModbusDriver(BaseDriver):
             blocks: list[list[dict[str, Any]]] = []
             current_block: list[dict[str, Any]] = []
             prev_end = -999
+            limit = (
+                _MAX_BITS_PER_READ if reg_type in ("coil", "discrete") else _MAX_REGISTERS_PER_READ
+            )
             for reg in regs_sorted:
                 addr = reg["address"]
                 cnt = reg.get("count", 1)
-                if current_block and (addr - prev_end) > _MAX_GAP:
+                reg_end = addr + cnt
+                if current_block and (
+                    (addr - prev_end) > _MAX_GAP
+                    # never plan a transaction above the protocol limit; a register
+                    # is never cut, it starts the next block
+                    or (max(prev_end, reg_end) - current_block[0]["address"]) > limit
+                ):
                     blocks.append(current_block)
                     current_block = []
                 current_block.append(reg)
-                prev_end = addr + cnt
+                # furthest end seen: registers may overlap (a word decoded two ways)
+                prev_end = reg_end if len(current_block) == 1 else max(prev_end, reg_end)
             if current_block:
                 blocks.append(current_block)
             plan.append((reg_type, blocks))
         return plan
+
+    @staticmethod
+    def _block_span(block: list[dict[str, Any]]) -> int:
+        """Words covering every register of a block (registers may overlap or share addresses)."""
+        start = block[0]["address"]
+        return max(r["address"] + r.get("count", 1) for r in block) - start
 
     async def read_registers(self) -> list[dict[str, Any]]:
         """
@@ -360,8 +400,7 @@ class ModbusDriver(BaseDriver):
             # Read each block in one Modbus transaction
             for block in blocks:
                 start_addr = block[0]["address"]
-                end_reg = block[-1]
-                total_count = (end_reg["address"] - start_addr) + end_reg.get("count", 1)
+                total_count = self._block_span(block)
 
                 try:
                     raw_registers = await self._read_raw_block(
@@ -378,13 +417,42 @@ class ModbusDriver(BaseDriver):
                     offset = reg["address"] - start_addr
                     cnt = reg.get("count", 1)
 
-                    if cnt == 1:
-                        val = float(raw_registers[offset])
-                    elif cnt == 2:
-                        val = float((raw_registers[offset] << 16) | raw_registers[offset + 1])
+                    if reg_type in ("coil", "discrete"):
+                        # Bits: unchanged historical behaviour.
+                        if cnt == 2:
+                            val = float((raw_registers[offset] << 16) | raw_registers[offset + 1])
+                        else:
+                            val = float(raw_registers[offset])
                     else:
-                        val = float(raw_registers[offset])
+                        try:
+                            val = decode_words(
+                                raw_registers[offset:offset + max(cnt, 1)],
+                                data_type=reg.get("data_type"),
+                                word_order=reg.get("word_order"),
+                                bit_offset=reg.get("bit_offset"),
+                                bit_length=reg.get("bit_length"),
+                                count=cnt,
+                            )
+                        except NonFiniteValueError:
+                            # Drop only this register for this poll; the rest of the
+                            # block is still delivered and the sensor stays healthy.
+                            rname = str(reg.get("name", f"reg_{reg['address']}"))
+                            if rname not in self._nonfinite_warned:
+                                self._nonfinite_warned.add(rname)
+                                self._log.warning(
+                                    "Non-finite value dropped",
+                                    sensor_id=self.sensor_id,
+                                    register=rname,
+                                    address=reg["address"],
+                                )
+                            continue
+                        except ValueError as e:
+                            raise ReadError(
+                                f"Cannot decode register '{reg.get('name')}' "
+                                f"at {reg_type} {reg['address']}: {e}"
+                            ) from e
 
+                    self._nonfinite_warned.discard(str(reg.get("name", f"reg_{reg['address']}")))
                     results.append({
                         "register_id": reg["id"],
                         "name": reg.get("name", f"reg_{reg['address']}"),
@@ -438,8 +506,50 @@ class ModbusDriver(BaseDriver):
         """Update the register configuration (hot-reload)."""
         self._registers = registers
 
+    @property
+    def read_only(self) -> bool:
+        """True when this sensor, or the bus it sits on, must never be written."""
+        return self._write_refusal() is not None
+
+    def _endpoint_key(self) -> str | None:
+        if self._bus_key is not None:
+            return self._bus_key
+        try:
+            return self._bus_spec()[0]
+        except ConnectionError:
+            return None
+
+    def _write_refusal(self) -> str | None:
+        """Why a write must be refused, or None. Pure: no I/O."""
+        if self._sensor_read_only:
+            return "sensor is read-only"
+        key = self._endpoint_key()
+        if key is not None and (
+            modbus_bus.bus_is_locked(key)
+            or (self._bus is not None and self._bus.read_only)
+        ):
+            return "endpoint is read-only"
+        return None
+
     async def write(self, value: float) -> bool:
         """Write value to Modbus register (waits for the bus between rounds)."""
+        # First statement on purpose: nothing, not even a connection check or
+        # the bus lock, may run before the read-only decision.
+        refusal = self._write_refusal()
+        if refusal is not None:
+            endpoint = self._endpoint_key()
+            if not self._refusal_logged:
+                self._refusal_logged = True
+                self._log.warning(
+                    "Write refused",
+                    sensor_id=self.sensor_id,
+                    endpoint=endpoint,
+                    reason=refusal,
+                )
+            raise ReadOnlyEndpointError(
+                f"Write refused: {refusal} (sensor {self.sensor_id}, endpoint {endpoint})"
+            )
+
         if not self._client:
             raise WriteError("Not connected")
 

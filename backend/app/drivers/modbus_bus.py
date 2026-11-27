@@ -36,6 +36,16 @@ Frozen contract
   round budget vs. the shortest poll interval. Problems are logged as warnings
   so an impossible configuration cannot go unnoticed.
 
+* Read-only buses: a bus is locked when its endpoint is listed in
+  ``modbus.read_only_endpoints`` or when any sensor registered on it carries
+  ``connection_params.read_only``. The lock is latched per bus key for the life
+  of the process (a sensor update removes and re-adds sensors, destroying the
+  bus in between). The pymodbus client is ALWAYS reached through
+  ``ReadGuardedClient``; while the bus is locked it exposes only the four read
+  methods, connect/close/connected, and ``execute`` for function codes 1-4.
+  Everything else (every write, diagnostics, anything added by a future
+  pymodbus) raises ``ReadOnlyEndpointError``. Deny by default.
+
 The planning rules are pure functions (``plan_round``, ``next_health``) so they
 are unit-testable without I/O.
 """
@@ -44,6 +54,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
+import socket
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -51,6 +63,9 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 import structlog
+from pymodbus.pdu import ModbusPDU
+
+from app.drivers.base import ReadOnlyEndpointError
 
 logger = structlog.get_logger()
 
@@ -91,6 +106,104 @@ class BusConnectionError(Exception):
     """The bus itself (gateway / serial port) is unusable. Not the sensor's fault."""
 
 
+
+def literal_address(host: str) -> str | None:
+    """Canonical IP of an IP LITERAL host, or None for anything else (names included).
+
+    No name resolution, ever. IPv4 goes through ``socket.inet_aton`` (so the
+    legacy numeric forms 127.1, 2130706433, 0x7f000001, 0177.0.0.1 collapse to
+    one address); IPv6 through ``ipaddress`` (brackets optional, IPv4-mapped
+    addresses fold to their IPv4).
+    """
+    if not isinstance(host, str):
+        return None
+    text = host.strip("[]") if host.startswith("[") and host.endswith("]") else host
+    if not text or any(c.isspace() for c in text) or "[" in text or "]" in text:
+        return None
+    try:
+        if ":" in text:
+            # A scope id (%eth0, %1) is not part of the address: drop it, but an
+            # empty one is malformed.
+            base, pct, zone = text.partition("%")
+            if pct and not zone:
+                return None
+            ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.IPv6Address(base)
+            if ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+            return str(ip)
+        return str(ipaddress.IPv4Address(socket.inet_aton(text)))
+    except (OSError, ValueError):
+        return None
+
+
+def _split_endpoint(value: str) -> tuple[str, int]:
+    """Strict config parser: ``ip:port`` or ``[ipv6]:port`` (unbracketed IPv6 + port also accepted).
+
+    Returns (canonical ip, port). ValueError for names and anything malformed.
+    """
+    bad = ValueError(
+        f"read-only endpoint must be 'ip:port' or '[ipv6]:port' with an IP literal "
+        f"(host names are not allowed), got {value!r}"
+    )
+    if not isinstance(value, str):
+        raise bad
+    text = value.strip()
+    if not text or any(c.isspace() for c in text):
+        raise bad
+    if text.startswith("["):
+        host, sep, rest = text[1:].partition("]")
+        if not sep or not rest.startswith(":"):
+            raise bad
+        port = rest[1:]
+    else:
+        host, sep, port = text.rpartition(":")
+        if not sep:
+            raise bad
+    if not (port.isascii() and port.isdigit()) or not 1 <= int(port) <= 65535:
+        raise bad
+    address = literal_address(host)
+    if address is None:
+        raise bad
+    return address, int(port)
+
+
+def normalise_endpoint(value: str) -> str:
+    """Canonical ``ip:port`` / ``[ipv6]:port``. ValueError if not an IP-literal endpoint."""
+    address, port = _split_endpoint(value)
+    return f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
+
+
+def _key_host_port(key: str) -> tuple[str, int] | None:
+    """``tcp://host:port`` -> (host without brackets, port); None for serial keys / bad ports."""
+    if not key.startswith("tcp://"):
+        return None
+    host, sep, port = key[len("tcp://"):].rpartition(":")
+    if not sep or not host or not (port.isascii() and port.isdigit()):
+        return None
+    return host, int(port)
+
+
+def key_address(key: str) -> tuple[str, int] | None:
+    """Canonical (ip, port) of a TCP bus key, or None when its host is not an IP literal."""
+    parts = _key_host_port(key)
+    if parts is None:
+        return None
+    address = literal_address(parts[0])
+    return (address, parts[1]) if address is not None else None
+
+
+def bus_key_for(mode: str, params: dict[str, Any]) -> str | None:
+    """The scheduler key a sensor with these connection params lands on."""
+    try:
+        if mode == "tcp":
+            return f"tcp://{params.get('host', 'localhost')}:{int(params.get('port', 502))}"
+        if mode == "rtu":
+            return f"rtu://{params.get('port', '/dev/ttyUSB0')}"
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
 @dataclass(frozen=True)
 class BusSettings:
     """Bus-level timing contract (configurable via the ``modbus:`` config section)."""
@@ -100,8 +213,19 @@ class BusSettings:
     quarantine_max_s: float = 60.0
     gateway_settle_s: float = 0.0
     delivery_queue_max: int = 10_000
+    # "host:port" of Modbus-TCP endpoints DaTaK must never write to.
+    read_only_endpoints: tuple[str, ...] = ()
+    # Derived at construction: canonical (ip, port) of the endpoints. No DNS.
+    read_only_addresses: frozenset[tuple[str, int]] = field(init=False, default=frozenset())
 
     def __post_init__(self) -> None:
+        # Names and malformed entries fail startup: a typo or a name must not
+        # silently leave a write-capable controller unprotected.
+        endpoints = tuple(normalise_endpoint(e) for e in self.read_only_endpoints)
+        object.__setattr__(self, "read_only_endpoints", endpoints)
+        object.__setattr__(
+            self, "read_only_addresses", frozenset(_split_endpoint(e) for e in endpoints)
+        )
         if self.round_budget_s <= 0:
             raise ValueError(f"round_budget_s must be > 0, got {self.round_budget_s}")
         if self.default_transaction_timeout_s <= 0:
@@ -314,6 +438,189 @@ def assert_supported_client(client: Any) -> None:
         ) from exc
 
 
+# ── read-only guard ──────────────────────────────────────────────────────────
+
+# The only client attributes reachable while a bus is locked.
+_READ_METHODS = frozenset(
+    {"read_coils", "read_discrete_inputs", "read_holding_registers", "read_input_registers"}
+)
+_LIFECYCLE = frozenset({"connect", "close"})
+_READ_FUNCTION_CODES = frozenset({1, 2, 3, 4})
+
+
+def read_only_requested(params: Any) -> bool:
+    """Is a sensor's ``read_only`` flag set? Fails towards read-only.
+
+    Only an absent key, None, False or 0 means writable. A misconfigured value
+    such as the string ``"false"`` locks the sensor: a refused write is
+    recoverable, a tracker that moved is not.
+    """
+    if not isinstance(params, dict) or "read_only" not in params:
+        return False
+    value = params["read_only"]
+    return not (value is None or value is False or (type(value) is int and value == 0))
+
+
+class _ReadOnlyCtxView:
+    """What a locked client shows of ``ctx``: only the timeout parameters.
+
+    ``ModbusBaseClient.execute`` delegates to ``ctx.execute``; handing out the
+    real ctx would leave a write path around the guard. The real ctx is held in
+    a name-mangled attribute, not reachable as ``_ctx``.
+    """
+
+    def __init__(self, ctx: Any, refuse: Any) -> None:
+        self.__ctx = ctx
+        self.__refuse = refuse
+
+    @property
+    def comm_params(self) -> Any:
+        return self.__ctx.comm_params
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        self.__refuse(f"ctx.{name}")
+        raise AssertionError("unreachable")  # pragma: no cover
+
+
+class ReadGuardedClient:
+    """Allow-list proxy around a pymodbus client (see module docstring).
+
+    The wrapped client is name-mangled so it is not reachable as a plain
+    attribute (``guard._client`` does not exist).
+    """
+
+    def __init__(self, client: Any, key: str, is_locked: Any) -> None:
+        self.__client = client
+        self.__key = key
+        self.__is_locked = is_locked
+        self.__refused: set[str] = set()
+        self.__log = logger.bind(component="modbus_bus", bus=key)
+
+    def __refuse(self, name: str) -> None:
+        if name not in self.__refused:
+            self.__refused.add(name)
+            self.__log.warning("Write refused by read-only client guard", method=name)
+        raise ReadOnlyEndpointError(
+            f"Modbus endpoint {self.__key} is read-only: '{name}' refused"
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        # Only reached for names not defined on this class.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if self.__is_locked() and name not in _READ_METHODS and name not in _LIFECYCLE:
+            self.__refuse(name)
+        return getattr(self.__client, name)
+
+    @property
+    def connected(self) -> bool:
+        return bool(self.__client.connected)
+
+    @property
+    def ctx(self) -> Any:
+        if self.__is_locked():
+            return _ReadOnlyCtxView(self.__client.ctx, self.__refuse)
+        return self.__client.ctx
+
+    def execute(self, no_response_expected: bool, request: Any) -> Any:
+        if self.__is_locked():
+            code = getattr(request, "function_code", None)
+            class_code = getattr(type(request), "function_code", None)
+            if not (
+                isinstance(request, ModbusPDU)
+                and type(code) is int
+                and code == class_code
+                and code in _READ_FUNCTION_CODES
+            ):
+                self.__refuse(f"execute(function_code={code!r})")
+        return self.__client.execute(no_response_expected, request)
+
+
+# Bus keys (and canonical addresses of literal hosts) locked for the life of the process,
+# whatever happens to the bus object.
+_read_only_latch: set[str] = set()
+_latched_addresses: set[tuple[str, int]] = set()
+# A flagged sensor whose host is a NAME: we cannot know which address it means,
+# so every TCP bus is locked.
+_all_tcp_latched = False
+
+
+def lock_bus(key: str, reason: str) -> None:
+    """Latch ``key`` read-only (idempotent); a literal host also latches its canonical address.
+
+    A latch on a non-literal host needs nothing more: while any latch exists,
+    every non-literal host is locked (see ``bus_is_locked``). Cannot be undone
+    short of a restart.
+    """
+    global _all_tcp_latched
+    address = key_address(key)
+    if address is not None:
+        _latched_addresses.add(address)
+    elif key.startswith("tcp://"):
+        _all_tcp_latched = True
+    if key not in _read_only_latch:
+        _read_only_latch.add(key)
+        logger.info(
+            "Modbus bus locked read-only",
+            bus=key,
+            reason=reason,
+            address=None if address is None else f"{address[0]}:{address[1]}",
+        )
+
+
+def _reset_read_only_latch() -> None:
+    """Test helper: forget all latched keys/addresses."""
+    global _all_tcp_latched
+    _read_only_latch.clear()
+    _latched_addresses.clear()
+    _all_tcp_latched = False
+
+
+def bus_is_locked(key: str, settings: BusSettings | None = None) -> bool:
+    """Is this bus read-only? By latch key, by canonical address, or fail-closed.
+
+    No name resolution. A TCP bus whose host is not an IP literal is locked as
+    soon as anything is read-only (configured endpoint or any latch): a name
+    can point anywhere, now or later. With nothing read-only, names work as before.
+    """
+    if key in _read_only_latch:
+        return True
+    if not key.startswith("tcp://"):
+        return False
+    if _all_tcp_latched:
+        return True
+    configs = [_settings] if settings is None else [_settings, settings]
+    if not (_read_only_latch or any(c.read_only_endpoints for c in configs)):
+        return False
+    address = key_address(key)
+    if address is None:
+        return True  # fail closed
+    if address in _latched_addresses:
+        return True
+    return any(address in c.read_only_addresses for c in configs)
+
+
+def row_refuses_writes(protocol: str, params: dict[str, Any]) -> str | None:
+    """Why a STORED sensor row can never be written (no driver needed), or None.
+
+    The bus key is derived as the driver sees it: the orchestrator forces the
+    mode from the protocol (MODBUS_TCP/MODBUS_RTU), otherwise ``connection_params
+    ["mode"]`` (default tcp). Both are checked, so a contradictory row cannot slip through.
+    """
+    if read_only_requested(params):
+        return "sensor is read-only"
+    if protocol not in ("MODBUS_TCP", "MODBUS_RTU"):
+        return None
+    modes = {"MODBUS_TCP": "tcp", "MODBUS_RTU": "rtu"}[protocol], params.get("mode", "tcp")
+    for mode in dict.fromkeys(modes):
+        key = bus_key_for(str(mode), params)
+        if key is not None and bus_is_locked(key):
+            return "endpoint is read-only"
+    return None
+
+
 @dataclass
 class _Registration:
     job: BusJob
@@ -327,7 +634,9 @@ class BusScheduler:
     def __init__(self, key: str, client: Any, settings: BusSettings) -> None:
         assert_supported_client(client)
         self.key = key
-        self.client = client
+        # Always guarded; the guard locks/unlocks dynamically, so every holder
+        # of this object (drivers cache it) sees a later lock.
+        self.client: Any = ReadGuardedClient(client, key, self._locked)
         self.settings = settings
         self._regs: dict[int, _Registration] = {}
         self._bus_lock = asyncio.Lock()
@@ -345,6 +654,13 @@ class BusScheduler:
         self._reconnect_delay_s = 0.0
         self._reconnect_at = 0.0
         self._log = logger.bind(component="modbus_bus", bus=key)
+
+    def _locked(self) -> bool:
+        return bus_is_locked(self.key, self.settings)
+
+    @property
+    def read_only(self) -> bool:
+        return self._locked()
 
     # ── registration ─────────────────────────────────────────────────────────
 
@@ -705,8 +1021,15 @@ def get_bus(key: str) -> BusScheduler | None:
     return _buses.get(key)
 
 
-def get_or_create_bus(key: str, client_factory: Any) -> BusScheduler:
-    """Return the scheduler for ``key``, creating it (and its client) once."""
+def get_or_create_bus(
+    key: str, client_factory: Any, *, read_only: bool = False
+) -> BusScheduler:
+    """Return the scheduler for ``key``, creating it (and its client) once.
+
+    ``read_only`` latches the key read-only (also for an already existing bus).
+    """
+    if read_only:
+        lock_bus(key, "read-only sensor registered")
     bus = _buses.get(key)
     if bus is None:
         bus = BusScheduler(key, client_factory(), _settings)

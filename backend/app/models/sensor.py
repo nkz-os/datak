@@ -150,6 +150,13 @@ class SensorRegister(Base, TimestampMixin):
     unit: Mapped[str | None] = mapped_column(String(20))
     decimal_places: Mapped[int] = mapped_column(default=2)
 
+    # Word decoding (see app/drivers/register_decode.py). NULL data_type keeps
+    # the historical behaviour; NULL word_order means high_first.
+    data_type: Mapped[str | None] = mapped_column(String(10), default=None)
+    word_order: Mapped[str | None] = mapped_column(String(10), default="high_first")
+    bit_offset: Mapped[int | None] = mapped_column(Integer, default=None)
+    bit_length: Mapped[int | None] = mapped_column(Integer, default=None)
+
     # Runtime status
     last_value: Mapped[float | None] = mapped_column(Float, default=None)
     last_raw_value: Mapped[float | None] = mapped_column(Float, default=None)
@@ -159,6 +166,26 @@ class SensorRegister(Base, TimestampMixin):
 
     # Relationship
     sensor: Mapped["Sensor"] = relationship("Sensor", back_populates="registers")
+
+    def to_driver_config(self) -> dict[str, Any]:
+        """Register definition as handed to the Modbus driver."""
+        from app.core.sdm import get_sdm_attribute
+
+        return {
+            "id": self.id,
+            "name": self.name,
+            "address": self.address,
+            "count": self.count,
+            "register_type": self.register_type,
+            "data_formula": self.data_formula,
+            "unit": self.unit,
+            "decimal_places": self.decimal_places,
+            "twin_attribute": self.twin_attribute or get_sdm_attribute(self.name),
+            "data_type": self.data_type,
+            "word_order": self.word_order or "high_first",
+            "bit_offset": self.bit_offset,
+            "bit_length": self.bit_length,
+        }
 
     def __repr__(self) -> str:
         return f"<SensorRegister {self.name} addr={self.address} [{self.register_type}]>"

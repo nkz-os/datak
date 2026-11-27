@@ -118,6 +118,24 @@ modbus:
                                # (per sensor: connection_params.transaction_timeout_ms)
   quarantine_max_s: 60         # max backoff between probes of a dead slave
   gateway_settle_ms: 0         # pause after a failed transaction (see note)
+  read_only_endpoints: []      # explicit list (or leave the key out; "~" is rejected).
+                               # IP LITERALS only: "ip:port" or "[ipv6]:port"; a host name
+                               # stops the gateway at startup. DaTaK can never write to
+                               # these Modbus-TCP endpoints. Matched by canonical address
+                               # (127.1, 0x7f000001 and 127.0.0.1 are the same endpoint);
+                               # no DNS is ever used for this. IPv6 scope ids (%eth0) are
+                               # ignored. Only IPv4-mapped IPv6 (::ffff:a.b.c.d) is folded
+                               # to IPv4; NAT64, 6to4 and IPv4-compatible IPv6 forms are
+                               # NOT: list the IPv4 literal (and any such IPv6 form a
+                               # sensor might use).
+                               # WHILE ANY EXISTS, Modbus TCP devices configured by host
+                               # NAME cannot be written (they are polled normally): use
+                               # the IP address in the sensor to keep it writable.
+                               # An endpoint that must NEVER be written belongs HERE.
+                               # The per-sensor connection_params.read_only flag is NOT
+                               # durable: an operator can clear it through the API, and
+                               # after a restart an unflagged row is writable.
+                               # Unknown keys under "modbus" stop the gateway at startup.
 # NOTE: a Modbus-TCP->RTU gateway (e.g. EBYTE) has its own serial response
 # timeout. Preferably set it SHORTER than transaction_timeout_ms. If it cannot
 # be changed, set gateway_settle_ms >= gateway timeout - transaction_timeout_ms,
