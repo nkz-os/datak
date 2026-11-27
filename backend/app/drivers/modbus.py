@@ -39,6 +39,7 @@ from app.drivers.modbus_bus import (
     SensorHealth,
     read_only_requested,
 )
+from app.drivers.register_decode import decode_words
 
 # Sentinel to group contiguous registers for batch reading
 _MAX_GAP = 16  # max gap between registers to batch them together
@@ -360,6 +361,12 @@ class ModbusDriver(BaseDriver):
             plan.append((reg_type, blocks))
         return plan
 
+    @staticmethod
+    def _block_span(block: list[dict[str, Any]]) -> int:
+        """Words covering every register of a block (registers may overlap or share addresses)."""
+        start = block[0]["address"]
+        return max(r["address"] + r.get("count", 1) for r in block) - start
+
     async def read_registers(self) -> list[dict[str, Any]]:
         """
         Batch-read all configured registers for this sensor.
@@ -379,8 +386,7 @@ class ModbusDriver(BaseDriver):
             # Read each block in one Modbus transaction
             for block in blocks:
                 start_addr = block[0]["address"]
-                end_reg = block[-1]
-                total_count = (end_reg["address"] - start_addr) + end_reg.get("count", 1)
+                total_count = self._block_span(block)
 
                 try:
                     raw_registers = await self._read_raw_block(
@@ -397,12 +403,27 @@ class ModbusDriver(BaseDriver):
                     offset = reg["address"] - start_addr
                     cnt = reg.get("count", 1)
 
-                    if cnt == 1:
-                        val = float(raw_registers[offset])
-                    elif cnt == 2:
-                        val = float((raw_registers[offset] << 16) | raw_registers[offset + 1])
+                    if reg_type in ("coil", "discrete"):
+                        # Bits: unchanged historical behaviour.
+                        if cnt == 2:
+                            val = float((raw_registers[offset] << 16) | raw_registers[offset + 1])
+                        else:
+                            val = float(raw_registers[offset])
                     else:
-                        val = float(raw_registers[offset])
+                        try:
+                            val = decode_words(
+                                raw_registers[offset:offset + max(cnt, 1)],
+                                data_type=reg.get("data_type"),
+                                word_order=reg.get("word_order"),
+                                bit_offset=reg.get("bit_offset"),
+                                bit_length=reg.get("bit_length"),
+                                count=cnt,
+                            )
+                        except ValueError as e:
+                            raise ReadError(
+                                f"Cannot decode register '{reg.get('name')}' "
+                                f"at {reg_type} {reg['address']}: {e}"
+                            ) from e
 
                     results.append({
                         "register_id": reg["id"],
@@ -439,10 +460,9 @@ class ModbusDriver(BaseDriver):
         method_name = methods.get(reg_type)
         if method_name is None:
             raise ReadError(f"Unknown register type: {reg_type}")
-        client = self._bus.client if self._bus is not None else self._client
-        method = getattr(client, method_name)
+        method = getattr(self._client, method_name)
 
-        modbus_bus.set_response_timeout(client, self.transaction_timeout_s)
+        modbus_bus.set_response_timeout(self._client, self.transaction_timeout_s)
         result = await method(
             address=address, count=count, **_unit_kwarg(method, self.slave_id)
         )

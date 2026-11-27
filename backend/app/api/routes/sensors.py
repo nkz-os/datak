@@ -1,16 +1,16 @@
 """Sensor CRUD and management routes."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, OperatorUser
 from app.core.formula import validate_formula
-from app.core.sdm import get_sdm_attribute
 from app.drivers.base import ReadOnlyEndpointError
+from app.drivers.register_decode import validate_decoding
 from app.models.audit import AuditAction, AuditLog
 from app.models.sensor import Sensor, SensorProtocol, SensorRegister, SensorStatus
 from app.services.orchestrator import orchestrator
@@ -33,6 +33,27 @@ class RegisterCreate(BaseModel):
     unit: str | None = None
     decimal_places: int = Field(default=2, ge=0, le=6)
     twin_attribute: str | None = None
+    data_type: Literal["uint16", "int16", "uint32", "int32", "float32"] | None = Field(
+        default=None, description="NULL keeps the legacy decoding (count 1/2/other)"
+    )
+    word_order: Literal["high_first", "low_first"] | None = "high_first"
+    bit_offset: int | None = Field(default=None, ge=0, le=15)
+    bit_length: int | None = Field(default=None, ge=1, le=16)
+
+    @model_validator(mode="after")
+    def _check_decoding(self) -> "RegisterCreate":
+        try:
+            validate_decoding(
+                data_type=self.data_type,
+                word_order=self.word_order,
+                bit_offset=self.bit_offset,
+                bit_length=self.bit_length,
+                count=self.count,
+                register_type=self.register_type,
+            )
+        except ValueError as e:
+            raise ValueError(str(e)) from e
+        return self
 
 
 class RegisterResponse(BaseModel):
@@ -48,6 +69,15 @@ class RegisterResponse(BaseModel):
     last_value: float | None
     last_raw_value: float | None
     twin_attribute: str | None
+    data_type: str | None = None
+    word_order: str | None = "high_first"
+    bit_offset: int | None = None
+    bit_length: int | None = None
+
+    @field_validator("word_order", mode="before")
+    @classmethod
+    def _default_word_order(cls, v: Any) -> Any:
+        return v or "high_first"  # rows created before the column existed hold NULL
 
     class Config:
         from_attributes = True
@@ -232,6 +262,10 @@ async def create_sensor(
                 unit=reg.unit,
                 decimal_places=reg.decimal_places,
                 twin_attribute=reg.twin_attribute,
+                data_type=reg.data_type,
+                word_order=reg.word_order or "high_first",
+                bit_offset=reg.bit_offset,
+                bit_length=reg.bit_length,
             )
         )
 
@@ -254,20 +288,7 @@ async def create_sensor(
     await db.flush()  # Get ID
 
     # Build register configs for the driver
-    register_configs = [
-        {
-            "id": r.id,
-            "name": r.name,
-            "address": r.address,
-            "count": r.count,
-            "register_type": r.register_type,
-            "data_formula": r.data_formula,
-            "unit": r.unit,
-            "decimal_places": r.decimal_places,
-            "twin_attribute": r.twin_attribute or get_sdm_attribute(r.name),
-        }
-        for r in register_records
-    ]
+    register_configs = [r.to_driver_config() for r in register_records]
 
     # Start driver (hot-reload)
     if body.protocol not in (SensorProtocol.VIRTUAL.value, SensorProtocol.VIRTUAL_OUTPUT.value):
@@ -350,6 +371,10 @@ async def update_sensor(
                 unit=reg.get("unit"),
                 decimal_places=reg.get("decimal_places", 2),
                 twin_attribute=reg.get("twin_attribute"),
+                data_type=reg.get("data_type"),
+                word_order=reg.get("word_order") or "high_first",
+                bit_offset=reg.get("bit_offset"),
+                bit_length=reg.get("bit_length"),
             ))
         await db.flush()
         changes.append("registers")
@@ -377,20 +402,7 @@ async def update_sensor(
         if sensor.is_active:
             # Rebuild register configs
             await db.refresh(sensor, ["registers"])
-            register_configs = [
-                {
-                    "id": r.id,
-                    "name": r.name,
-                    "address": r.address,
-                    "count": r.count,
-                    "register_type": r.register_type,
-                    "data_formula": r.data_formula,
-                    "unit": r.unit,
-                    "decimal_places": r.decimal_places,
-                    "twin_attribute": r.twin_attribute or get_sdm_attribute(r.name),
-                }
-                for r in sensor.registers
-            ]
+            register_configs = [r.to_driver_config() for r in sensor.registers]
             await orchestrator.add_sensor(
                 sensor_id=sensor.id,
                 sensor_name=sensor.name,

@@ -86,6 +86,48 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
+async def load_active_sensors(session_factory: Any) -> int:
+    """Start a driver for every active sensor stored in the database.
+
+    Returns the number of sensors found.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from app.models.sensor import Sensor, SensorProtocol
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Sensor)
+            .options(selectinload(Sensor.registers))
+            .where(Sensor.is_active == True)  # noqa: E712
+            .where(Sensor.deleted_at == None)  # noqa: E711
+        )
+        sensors_list = result.scalars().all()
+
+        for sensor in sensors_list:
+            if sensor.protocol not in (SensorProtocol.VIRTUAL.value, SensorProtocol.VIRTUAL_OUTPUT.value):
+                register_configs = (
+                    [r.to_driver_config() for r in sensor.registers] if sensor.registers else None
+                )
+
+                await orchestrator.add_sensor(
+                    sensor_id=sensor.id,
+                    sensor_name=sensor.name,
+                    protocol=sensor.protocol,
+                    connection_params=sensor.connection_params,
+                    formula=sensor.data_formula,
+                    poll_interval_ms=sensor.poll_interval_ms,
+                    timeout_ms=sensor.timeout_ms,
+                    retry_count=sensor.retry_count,
+                    registers=register_configs,
+                    twin_entity_id=sensor.twin_entity_id,
+                )
+
+        logger.info("Loaded active sensors", count=len(sensors_list))
+        return len(sensors_list)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     """
@@ -147,54 +189,9 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("WebSocket callbacks registered")
 
     # Load existing active sensors and start their drivers
-    from sqlalchemy import select
-
-    from app.core.sdm import get_sdm_attribute
     from app.db.session import async_session_factory
-    from app.models.sensor import Sensor, SensorProtocol
 
-    async with async_session_factory() as session:
-        from sqlalchemy.orm import selectinload
-
-        result = await session.execute(
-            select(Sensor)
-            .options(selectinload(Sensor.registers))
-            .where(Sensor.is_active == True)  # noqa: E712
-            .where(Sensor.deleted_at == None)  # noqa: E711
-        )
-        sensors_list = result.scalars().all()
-
-        for sensor in sensors_list:
-            if sensor.protocol not in (SensorProtocol.VIRTUAL.value, SensorProtocol.VIRTUAL_OUTPUT.value):
-                register_configs = [
-                    {
-                        "id": r.id,
-                        "name": r.name,
-                        "address": r.address,
-                        "count": r.count,
-                        "register_type": r.register_type,
-                        "data_formula": r.data_formula,
-                        "unit": r.unit,
-                        "decimal_places": r.decimal_places,
-                        "twin_attribute": r.twin_attribute or get_sdm_attribute(r.name),
-                    }
-                    for r in sensor.registers
-                ] if sensor.registers else None
-
-                await orchestrator.add_sensor(
-                    sensor_id=sensor.id,
-                    sensor_name=sensor.name,
-                    protocol=sensor.protocol,
-                    connection_params=sensor.connection_params,
-                    formula=sensor.data_formula,
-                    poll_interval_ms=sensor.poll_interval_ms,
-                    timeout_ms=sensor.timeout_ms,
-                    retry_count=sensor.retry_count,
-                    registers=register_configs,
-                    twin_entity_id=sensor.twin_entity_id,
-                )
-
-        logger.info("Loaded active sensors", count=len(sensors_list))
+    await load_active_sensors(async_session_factory)
 
     yield
 
