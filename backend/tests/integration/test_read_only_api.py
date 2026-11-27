@@ -57,9 +57,9 @@ async def test_write_to_sensor_on_configured_read_only_endpoint_answers_409(
     async_client: AsyncClient, test_user: Any
 ) -> None:
     previous = modbus_bus.current_settings()
-    modbus_bus.configure(modbus_bus.BusSettings(read_only_endpoints=("cfg.example:502",)))
+    modbus_bus.configure(modbus_bus.BusSettings(read_only_endpoints=("127.0.0.1:502",)))
     try:
-        sid = await _create(async_client, test_user, _sensor("cfg", "cfg.example"))
+        sid = await _create(async_client, test_user, _sensor("cfg", "127.0.0.1"))
         response = await async_client.post(
             f"/api/sensors/{sid}/write", json={"value": 1.0}, headers=_auth(test_user)
         )
@@ -157,7 +157,7 @@ async def test_write_to_sensor_on_configured_endpoint_is_409_even_when_driver_is
     async_client: AsyncClient, test_user: Any
 ) -> None:
     previous = modbus_bus.current_settings()
-    modbus_bus.configure(modbus_bus.BusSettings(read_only_endpoints=("localhost:502",)))
+    modbus_bus.configure(modbus_bus.BusSettings(read_only_endpoints=("127.0.0.1:502",)))
     try:
         sid = await _create(async_client, test_user, _sensor("cfg-off", "127.0.0.1"))
         await orchestrator.remove_sensor(sid)

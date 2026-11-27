@@ -87,18 +87,13 @@ logger = structlog.get_logger()
 
 
 def describe_read_only(bus_settings: BusSettings) -> None:
-    """Log the effective read-only endpoints and what they resolved to."""
+    """Log the effective read-only endpoints (canonical IP:port)."""
     logger.info(
         "Modbus read-only endpoints",
         endpoints=list(bus_settings.read_only_endpoints),
-        resolved=sorted(f"{ip}:{port}" for ip, port in bus_settings.read_only_addresses),
-        unresolved=list(bus_settings.read_only_unresolved),
+        addresses=sorted(f"{ip}:{port}" for ip, port in bus_settings.read_only_addresses),
+        note="TCP buses whose host is not an IP literal are locked while any read-only endpoint exists",
     )
-    for endpoint in bus_settings.read_only_unresolved:
-        logger.warning(
-            "Read-only endpoint does not resolve; matched by spelling, unresolvable hosts are locked",
-            endpoint=endpoint,
-        )
 
 
 async def load_active_sensors(session_factory: Any) -> int:

@@ -42,8 +42,8 @@ def test_save_then_reload_keeps_the_endpoints(tmp_path: Path) -> None:
 
 
 def test_bus_settings_built_from_settings_normalises_and_rejects_typos() -> None:
-    ok = BusSettings(read_only_endpoints=("PLC.example:0502",))
-    assert ok.read_only_endpoints == ("plc.example:502",)
+    ok = BusSettings(read_only_endpoints=("192.0.2.10:0502",))
+    assert ok.read_only_endpoints == ("192.0.2.10:502",)
     with pytest.raises(ValueError):
         BusSettings(read_only_endpoints=("no-port",))
 
@@ -51,8 +51,8 @@ def test_bus_settings_built_from_settings_normalises_and_rejects_typos() -> None
 def test_startup_wiring_passes_the_endpoints_to_the_bus_contract() -> None:
     from app.main import build_bus_settings
 
-    built = build_bus_settings(Settings(modbus_read_only_endpoints=["plc.example:502"]))
-    assert built.read_only_endpoints == ("plc.example:502",)
+    built = build_bus_settings(Settings(modbus_read_only_endpoints=["192.0.2.10:502"]))
+    assert built.read_only_endpoints == ("192.0.2.10:502",)
     assert build_bus_settings(Settings()).read_only_endpoints == ()
 
 
@@ -60,7 +60,14 @@ def test_startup_refuses_a_malformed_endpoint() -> None:
     from app.main import build_bus_settings
 
     with pytest.raises(ValueError):
-        build_bus_settings(Settings(modbus_read_only_endpoints=["plc.example"]))
+        build_bus_settings(Settings(modbus_read_only_endpoints=["192.0.2.10"]))
+
+
+def test_startup_refuses_a_host_name_endpoint() -> None:
+    from app.main import build_bus_settings
+
+    with pytest.raises(ValueError, match="IP literal"):
+        build_bus_settings(Settings(modbus_read_only_endpoints=["plc.example:502"]))
 
 
 @pytest.mark.parametrize(
@@ -92,7 +99,6 @@ def test_startup_logs_the_effective_resolved_list(caplog: pytest.LogCaptureFixtu
     from app.main import describe_read_only
 
     caplog.set_level("INFO")
-    built = BusSettings(read_only_endpoints=("localhost:502",))
+    built = BusSettings(read_only_endpoints=("127.1:502",))
     describe_read_only(built)
     assert "127.0.0.1:502" in caplog.text
-    assert "localhost:502" in caplog.text

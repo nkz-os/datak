@@ -107,12 +107,42 @@ class BusConnectionError(Exception):
 
 
 
+def literal_address(host: str) -> str | None:
+    """Canonical IP of an IP LITERAL host, or None for anything else (names included).
+
+    No name resolution, ever. IPv4 goes through ``socket.inet_aton`` (so the
+    legacy numeric forms 127.1, 2130706433, 0x7f000001, 0177.0.0.1 collapse to
+    one address); IPv6 through ``ipaddress`` (brackets optional, IPv4-mapped
+    addresses fold to their IPv4).
+    """
+    if not isinstance(host, str):
+        return None
+    text = host.strip("[]") if host.startswith("[") and host.endswith("]") else host
+    if not text or any(c.isspace() for c in text) or "[" in text or "]" in text:
+        return None
+    try:
+        if ":" in text:
+            ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.IPv6Address(text)
+            if ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+            return str(ip)
+        return str(ipaddress.IPv4Address(socket.inet_aton(text)))
+    except (OSError, ValueError):
+        return None
+
+
 def _split_endpoint(value: str) -> tuple[str, int]:
-    """Strict ``host:port`` / ``[ipv6]:port`` parser for configuration. ValueError if malformed."""
-    bad = ValueError(f"read-only endpoint must be 'host:port' or '[ipv6]:port', got {value!r}")
+    """Strict config parser: ``ip:port`` or ``[ipv6]:port`` (unbracketed IPv6 + port also accepted).
+
+    Returns (canonical ip, port). ValueError for names and anything malformed.
+    """
+    bad = ValueError(
+        f"read-only endpoint must be 'ip:port' or '[ipv6]:port' with an IP literal "
+        f"(host names are not allowed), got {value!r}"
+    )
     if not isinstance(value, str):
         raise bad
-    text = value.strip().lower()
+    text = value.strip()
     if not text or any(c.isspace() for c in text):
         raise bad
     if text.startswith("["):
@@ -122,20 +152,20 @@ def _split_endpoint(value: str) -> tuple[str, int]:
         port = rest[1:]
     else:
         host, sep, port = text.rpartition(":")
-        if not sep or ":" in host:  # unbracketed IPv6 is ambiguous with the port
+        if not sep:
             raise bad
-    host = host.rstrip(".")
-    if not host or "[" in host or "]" in host:
-        raise bad
     if not (port.isascii() and port.isdigit()) or not 1 <= int(port) <= 65535:
         raise bad
-    return host, int(port)
+    address = literal_address(host)
+    if address is None:
+        raise bad
+    return address, int(port)
 
 
 def normalise_endpoint(value: str) -> str:
-    """Canonical ``host:port`` / ``[ipv6]:port`` (lower-case, integer port). ValueError if malformed."""
-    host, port = _split_endpoint(value)
-    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    """Canonical ``ip:port`` / ``[ipv6]:port``. ValueError if not an IP-literal endpoint."""
+    address, port = _split_endpoint(value)
+    return f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
 
 
 def _key_host_port(key: str) -> tuple[str, int] | None:
@@ -145,44 +175,16 @@ def _key_host_port(key: str) -> tuple[str, int] | None:
     host, sep, port = key[len("tcp://"):].rpartition(":")
     if not sep or not host or not (port.isascii() and port.isdigit()):
         return None
-    return host.strip("[]"), int(port)
+    return host, int(port)
 
 
-def endpoint_of_key(key: str) -> str | None:
-    """``tcp://host:port`` -> normalised ``host:port``; None for serial buses."""
+def key_address(key: str) -> tuple[str, int] | None:
+    """Canonical (ip, port) of a TCP bus key, or None when its host is not an IP literal."""
     parts = _key_host_port(key)
     if parts is None:
         return None
-    host, port = parts
-    try:
-        return normalise_endpoint(f"[{host}]:{port}" if ":" in host else f"{host}:{port}")
-    except ValueError:
-        return None
-
-
-def resolve_addresses(host: str, port: int) -> frozenset[tuple[str, int]] | None:
-    """Every (canonical ip, port) a TCP host name/literal points to; None if unresolvable.
-
-    Uses getaddrinfo, so decimal/hex/short IPv4 forms and ``localhost`` all
-    collapse to the same addresses. IPv4-mapped IPv6 is folded to IPv4.
-    """
-    name = host.strip().strip("[]")
-    if not name:
-        return None
-    try:
-        infos = socket.getaddrinfo(name, port, type=socket.SOCK_STREAM)
-    except (OSError, UnicodeError):
-        return None
-    found: set[tuple[str, int]] = set()
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(str(info[4][0]).split("%")[0])
-        except ValueError:
-            continue
-        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-            ip = ip.ipv4_mapped
-        found.add((str(ip), port))
-    return frozenset(found) if found else None
+    address = literal_address(parts[0])
+    return (address, parts[1]) if address is not None else None
 
 
 def bus_key_for(mode: str, params: dict[str, Any]) -> str | None:
@@ -208,27 +210,17 @@ class BusSettings:
     delivery_queue_max: int = 10_000
     # "host:port" of Modbus-TCP endpoints DaTaK must never write to.
     read_only_endpoints: tuple[str, ...] = ()
-    # Derived at construction (= configure time): addresses the endpoints resolve to,
-    # and the endpoints that did not resolve (matched by spelling, fail-closed).
+    # Derived at construction: canonical (ip, port) of the endpoints. No DNS.
     read_only_addresses: frozenset[tuple[str, int]] = field(init=False, default=frozenset())
-    read_only_unresolved: tuple[str, ...] = field(init=False, default=())
 
     def __post_init__(self) -> None:
-        # Malformed entries fail startup: a typo must not silently leave a
-        # write-capable controller unprotected.
+        # Names and malformed entries fail startup: a typo or a name must not
+        # silently leave a write-capable controller unprotected.
         endpoints = tuple(normalise_endpoint(e) for e in self.read_only_endpoints)
         object.__setattr__(self, "read_only_endpoints", endpoints)
-        addresses: set[tuple[str, int]] = set()
-        unresolved: list[str] = []
-        for endpoint in endpoints:
-            host, port = _split_endpoint(endpoint)
-            resolved = resolve_addresses(host, port)
-            if resolved is None:
-                unresolved.append(endpoint)
-            else:
-                addresses |= resolved
-        object.__setattr__(self, "read_only_addresses", frozenset(addresses))
-        object.__setattr__(self, "read_only_unresolved", tuple(unresolved))
+        object.__setattr__(
+            self, "read_only_addresses", frozenset(_split_endpoint(e) for e in endpoints)
+        )
         if self.round_budget_s <= 0:
             raise ValueError(f"round_budget_s must be > 0, got {self.round_budget_s}")
         if self.default_transaction_timeout_s <= 0:
@@ -541,88 +533,76 @@ class ReadGuardedClient:
         return self.__client.execute(no_response_expected, request)
 
 
-# Bus keys (and the addresses they resolve to) locked for the life of the process,
+# Bus keys (and canonical addresses of literal hosts) locked for the life of the process,
 # whatever happens to the bus object.
 _read_only_latch: set[str] = set()
 _latched_addresses: set[tuple[str, int]] = set()
-# Resolution of each TCP bus key, taken when a bus is created (never per read).
-_key_addresses: dict[str, frozenset[tuple[str, int]] | None] = {}
-
-
-def refresh_key_addresses(key: str) -> frozenset[tuple[str, int]] | None:
-    """(Re)resolve a TCP bus key; called when a bus is created."""
-    parts = _key_host_port(key)
-    result = resolve_addresses(*parts) if parts is not None else None
-    _key_addresses[key] = result
-    return result
-
-
-def _addresses_for(key: str) -> frozenset[tuple[str, int]] | None:
-    if key not in _key_addresses:
-        return refresh_key_addresses(key)
-    return _key_addresses[key]
 
 
 def lock_bus(key: str, reason: str) -> None:
-    """Latch ``key`` AND the addresses it resolves to read-only (idempotent).
+    """Latch ``key`` read-only (idempotent); a literal host also latches its canonical address.
 
-    Cannot be undone short of a restart.
+    A latch on a non-literal host needs nothing more: while any latch exists,
+    every non-literal host is locked (see ``bus_is_locked``). Cannot be undone
+    short of a restart.
     """
-    addresses = refresh_key_addresses(key)
-    if addresses:
-        _latched_addresses.update(addresses)
+    address = key_address(key)
+    if address is not None:
+        _latched_addresses.add(address)
     if key not in _read_only_latch:
         _read_only_latch.add(key)
         logger.info(
             "Modbus bus locked read-only",
             bus=key,
             reason=reason,
-            addresses=sorted(f"{ip}:{port}" for ip, port in addresses or ()),
+            address=None if address is None else f"{address[0]}:{address[1]}",
         )
 
 
 def _reset_read_only_latch() -> None:
-    """Test helper: forget all latched keys/addresses and cached resolutions."""
+    """Test helper: forget all latched keys/addresses."""
     _read_only_latch.clear()
     _latched_addresses.clear()
-    _key_addresses.clear()
 
 
 def bus_is_locked(key: str, settings: BusSettings | None = None) -> bool:
-    """Is this bus read-only? By latch key, by address, or fail-closed.
+    """Is this bus read-only? By latch key, by canonical address, or fail-closed.
 
-    A TCP bus whose host cannot be resolved is locked as soon as anything is
-    read-only (configured endpoints or any latch): we cannot prove it is a
-    different device.
+    No name resolution. A TCP bus whose host is not an IP literal is locked as
+    soon as anything is read-only (configured endpoint or any latch): a name
+    can point anywhere, now or later. With nothing read-only, names work as before.
     """
     if key in _read_only_latch:
         return True
     if not key.startswith("tcp://"):
         return False
     configs = [_settings] if settings is None else [_settings, settings]
-    anything_locked = bool(_read_only_latch) or any(c.read_only_endpoints for c in configs)
-    if not anything_locked:
+    if not (_read_only_latch or any(c.read_only_endpoints for c in configs)):
         return False
-    addresses = _addresses_for(key)
-    if addresses is None:
+    address = key_address(key)
+    if address is None:
         return True  # fail closed
-    locked = set(_latched_addresses)
-    for c in configs:
-        locked |= c.read_only_addresses
-    if addresses & locked:
+    if address in _latched_addresses:
         return True
-    endpoint = endpoint_of_key(key)
-    return endpoint is not None and any(endpoint in c.read_only_unresolved for c in configs)
+    return any(address in c.read_only_addresses for c in configs)
 
 
 def row_refuses_writes(protocol: str, params: dict[str, Any]) -> str | None:
-    """Why a STORED sensor row can never be written (no driver needed), or None."""
+    """Why a STORED sensor row can never be written (no driver needed), or None.
+
+    The bus key is derived as the driver sees it: the orchestrator forces the
+    mode from the protocol (MODBUS_TCP/MODBUS_RTU), otherwise ``connection_params
+    ["mode"]`` (default tcp). Both are checked, so a contradictory row cannot slip through.
+    """
     if read_only_requested(params):
         return "sensor is read-only"
-    mode = {"MODBUS_TCP": "tcp", "MODBUS_RTU": "rtu"}.get(protocol)
-    key = bus_key_for(mode, params) if mode else None
-    if key is not None and bus_is_locked(key):
-        return "endpoint is read-only"
+    if protocol not in ("MODBUS_TCP", "MODBUS_RTU"):
+        return None
+    modes = {"MODBUS_TCP": "tcp", "MODBUS_RTU": "rtu"}[protocol], params.get("mode", "tcp")
+    for mode in dict.fromkeys(modes):
+        key = bus_key_for(str(mode), params)
+        if key is not None and bus_is_locked(key):
+            return "endpoint is read-only"
     return None
 
 
@@ -638,7 +618,6 @@ class BusScheduler:
 
     def __init__(self, key: str, client: Any, settings: BusSettings) -> None:
         assert_supported_client(client)
-        refresh_key_addresses(key)  # resolve once per bus creation, never per read
         self.key = key
         # Always guarded; the guard locks/unlocks dynamically, so every holder
         # of this object (drivers cache it) sees a later lock.

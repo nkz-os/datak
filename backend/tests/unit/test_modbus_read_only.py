@@ -30,8 +30,8 @@ from app.drivers.modbus_bus import (
     read_only_requested,
 )
 
-ENDPOINT = "plc.example:502"
-KEY = "tcp://plc.example:502"
+ENDPOINT = "192.0.2.10:502"
+KEY = "tcp://192.0.2.10:502"
 ALLOWED = {"read_coils", "read_discrete_inputs", "read_holding_registers", "read_input_registers"}
 
 
@@ -222,8 +222,8 @@ async def test_bus_locked_by_configured_endpoint() -> None:
         _ = bus.client.write_register
 
 
-async def test_endpoint_matching_normalises_case_space_and_port() -> None:
-    bus = _bus(key="tcp://PLC.Example:0502", endpoints=("  plc.EXAMPLE:502 ",))
+async def test_endpoint_matching_normalises_space_port_and_numeric_forms() -> None:
+    bus = _bus(key="tcp://0xc000020a:0502", endpoints=("  192.0.2.10:502 ",))
     assert bus.read_only is True
 
 
@@ -234,12 +234,12 @@ async def test_other_endpoint_is_not_locked() -> None:
 
 
 async def test_rtu_bus_is_not_matched_by_a_tcp_endpoint() -> None:
-    bus = _bus(key="rtu://plc.example:502", endpoints=(ENDPOINT,))
+    bus = _bus(key="rtu://192.0.2.10:502", endpoints=(ENDPOINT,))
     assert bus.read_only is False
 
 
 async def test_malformed_endpoint_in_settings_is_rejected_loudly() -> None:
-    for bad in ("plc.example", "plc.example:x", ":502", "plc.example:70000", ""):
+    for bad in ("192.0.2.10", "192.0.2.10:x", ":502", "192.0.2.10:70000", "", "plc.example:502"):
         with pytest.raises(ValueError):
             BusSettings(read_only_endpoints=(bad,))
 
@@ -299,7 +299,7 @@ async def test_read_only_requested_anything_else_locks(value: Any) -> None:
 
 
 def _driver(config: dict[str, Any] | None = None) -> ModbusDriver:
-    cfg = {"mode": "tcp", "host": "plc.example", "port": 502, "slave_id": 1,
+    cfg = {"mode": "tcp", "host": "192.0.2.10", "port": 502, "slave_id": 1,
            "register_type": "holding", "address": 5}
     cfg.update(config or {})
     return ModbusDriver(sensor_id=7, sensor_name="tracker", config=cfg)
@@ -342,7 +342,7 @@ async def test_driver_write_refused_when_a_neighbour_locked_the_bus() -> None:
         writer._client.write_register = AsyncMock()  # type: ignore[union-attr]
         ro = ModbusDriver(
             sensor_id=8, sensor_name="ro",
-            config={"mode": "tcp", "host": "plc.example", "port": 502, "read_only": True},
+            config={"mode": "tcp", "host": "192.0.2.10", "port": 502, "read_only": True},
         )
         await ro.connect()
         with pytest.raises(WriteError, match="read-only"):
@@ -375,5 +375,5 @@ async def test_driver_refusal_logged_once_at_warning_with_sensor_and_endpoint_no
     out = caplog.text
     assert out.count("Write refused") == 1
     assert "98765" not in out
-    assert "plc.example:502" in out
+    assert "192.0.2.10:502" in out
     assert "sensor_id" in out and "7" in out

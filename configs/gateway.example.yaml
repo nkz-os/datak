@@ -119,11 +119,14 @@ modbus:
   quarantine_max_s: 60         # max backoff between probes of a dead slave
   gateway_settle_ms: 0         # pause after a failed transaction (see note)
   read_only_endpoints: []      # explicit list (or leave the key out; "~" is rejected).
-                               # "host:port" or "[ipv6]:port". DaTaK can never write to
-                               # these Modbus-TCP endpoints. Matched by RESOLVED ADDRESS,
-                               # so "localhost" and "127.0.0.1" are the same endpoint; a
-                               # host that cannot be resolved is treated as locked
-                               # whenever any endpoint is read-only.
+                               # IP LITERALS only: "ip:port" or "[ipv6]:port"; a host name
+                               # stops the gateway at startup. DaTaK can never write to
+                               # these Modbus-TCP endpoints. Matched by canonical address
+                               # (127.1, 0x7f000001 and 127.0.0.1 are the same endpoint);
+                               # no DNS is ever used for this.
+                               # WHILE ANY EXISTS, Modbus TCP devices configured by host
+                               # NAME cannot be written (they are polled normally): use
+                               # the IP address in the sensor to keep it writable.
                                # An endpoint that must NEVER be written belongs HERE.
                                # The per-sensor connection_params.read_only flag is NOT
                                # durable: an operator can clear it through the API, and

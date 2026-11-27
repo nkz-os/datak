@@ -222,7 +222,9 @@ async def test_sanity_unlocked_bus_client_does_write(
     assert 6 in gw.function_codes
 
 
-@pytest.mark.parametrize("alias", ["localhost", "LOCALHOST", "127.1", "2130706433", "0x7f000001"])
+@pytest.mark.parametrize(
+    "alias", ["localhost", "LOCALHOST", "127.1", "2130706433", "0x7f000001", "::ffff:127.0.0.1"]
+)
 async def test_alias_of_a_configured_endpoint_never_puts_a_write_on_the_wire(
     gateway: tuple[RecordingGateway, int], alias: str
 ) -> None:

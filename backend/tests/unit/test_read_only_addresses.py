@@ -1,7 +1,13 @@
-"""Read-only locking is by resolved ADDRESS, not by the spelling of the host."""
+"""Read-only locking by canonical IP address, with NO name resolution anywhere.
+
+Configured endpoints are IP literals. A bus whose host is not an IP literal is
+locked as soon as anything is read-only (fail closed): a name can point
+anywhere, now or later, and DNS can stall the event loop.
+"""
 
 from __future__ import annotations
 
+import socket
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import MagicMock
@@ -11,10 +17,13 @@ from pymodbus.client import AsyncModbusTcpClient
 
 from app.drivers import modbus_bus
 from app.drivers.base import WriteError
-from app.drivers.modbus_bus import BusScheduler, BusSettings, resolve_addresses
+from app.drivers.modbus_bus import BusScheduler, BusSettings, literal_address
 
 PORT = 5020
-UNRESOLVABLE = "no-such-host.invalid"
+LOOPBACK_SPELLINGS = [
+    "127.0.0.1", "127.1", "2130706433", "0x7f000001", "0177.0.0.1", "0177.0.0.01",
+    "::ffff:127.0.0.1", "[::ffff:127.0.0.1]", "::ffff:7f00:1",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +35,21 @@ def _isolated() -> Iterator[None]:
     modbus_bus.configure(previous)
 
 
+@pytest.fixture(autouse=True)
+def _no_dns(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """Nothing in this feature may resolve a name: any such call fails the test."""
+    calls: list[str] = []
+
+    def boom(*args: Any, **_kw: Any) -> Any:
+        calls.append(repr(args))
+        raise AssertionError(f"name resolution attempted: {args!r}")
+
+    for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo"):
+        monkeypatch.setattr(socket, name, boom)
+    yield calls
+    assert calls == []
+
+
 def _client() -> AsyncModbusTcpClient:
     client = AsyncModbusTcpClient("localhost", port=1, retries=0)
     client.ctx = MagicMock()
@@ -33,149 +57,201 @@ def _client() -> AsyncModbusTcpClient:
     return client
 
 
-def _locked(host: str, endpoints: tuple[str, ...], port: int = PORT) -> bool:
+def _bus(host: str, endpoints: tuple[str, ...], port: int = PORT) -> BusScheduler:
     settings = BusSettings(read_only_endpoints=endpoints)
     modbus_bus.configure(settings)
-    return BusScheduler(f"tcp://{host}:{port}", _client(), settings).read_only
+    return BusScheduler(f"tcp://{host}:{port}", _client(), settings)
 
 
-# ── resolution ───────────────────────────────────────────────────────────────
+# ── canonical literal forms, no DNS ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize("host", LOOPBACK_SPELLINGS)
+def test_loopback_spellings_canonicalise_to_one_ipv4(host: str) -> None:
+    assert literal_address(host) == "127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    "host,expected",
+    [("::1", "::1"), ("[::1]", "::1"), ("0:0:0:0:0:0:0:1", "::1"), ("[0::1]", "::1"),
+     ("2001:DB8::1", "2001:db8::1")],
+)
+def test_ipv6_literals_canonicalise(host: str, expected: str) -> None:
+    assert literal_address(host) == expected
 
 
 @pytest.mark.parametrize(
     "host",
-    ["127.0.0.1", "localhost", "LOCALHOST", "localhost.", "127.1", "2130706433",
-     "0x7f000001", "0177.0.0.1", "[::1]", "::1"],
+    ["localhost", "LOCALHOST", "localhost.", "plc.example", "127.0.0.1.", "local host", "127.0.0.1 x",
+     "", " ", "256.1.1.1", "1.2.3.4.5", "::1::2", "[::1", "127.0.0.1\n", "fe80::1%eth0x y"],
 )
-def test_resolve_gives_canonical_ip_port_pairs(host: str) -> None:
-    got = resolve_addresses(host, PORT)
-    assert got is not None
-    assert ("127.0.0.1", PORT) in got or ("::1", PORT) in got
-    assert all(isinstance(ip, str) for ip, _ in got)
+def test_non_literals_are_none(host: str) -> None:
+    assert literal_address(host) is None
 
 
-def test_ipv4_mapped_ipv6_is_canonicalised_to_ipv4() -> None:
-    assert resolve_addresses("::ffff:127.0.0.1", PORT) == {("127.0.0.1", PORT)}
+# ── configuration: IP literals only ──────────────────────────────────────────
 
 
-@pytest.mark.parametrize("host", [UNRESOLVABLE, "local host", ""])
-def test_unresolvable_host_gives_none(host: str) -> None:
-    assert resolve_addresses(host, PORT) is None
+def test_configured_endpoints_are_canonicalised() -> None:
+    s = BusSettings(read_only_endpoints=("127.1:502", "0x7f000002:0503", "[::1]:504", "::ffff:10.0.0.1:505"))
+    assert s.read_only_endpoints == ("127.0.0.1:502", "127.0.0.2:503", "[::1]:504", "10.0.0.1:505")
+    assert s.read_only_addresses == {
+        ("127.0.0.1", 502), ("127.0.0.2", 503), ("::1", 504), ("10.0.0.1", 505)
+    }
 
 
-# ── the alias matrix ─────────────────────────────────────────────────────────
+def test_ipv6_endpoint_with_or_without_brackets() -> None:
+    assert BusSettings(read_only_endpoints=("::1:502",)).read_only_addresses == {("::1", 502)}
+    assert BusSettings(read_only_endpoints=("[::1]:502",)).read_only_addresses == {("::1", 502)}
 
-ALIASES = ["127.0.0.1", "localhost", "LOCALHOST", "localhost.", "127.1", "2130706433",
-           "0x7f000001", "0177.0.0.1"]
+
+@pytest.mark.parametrize(
+    "bad",
+    ["localhost:502", "plc.example:502", "LOCALHOST:502", "localhost.:502", "127.0.0.1.:502",
+     "127.0.0.1", "[::1]", "127.0.0.1:0", "127.0.0.1:70000", "127.0.0.1:x", "local host:502",
+     ":502", "", "[::1:502", "host:502:3"],
+)
+def test_names_and_malformed_endpoints_fail_startup(bad: str) -> None:
+    with pytest.raises(ValueError):
+        BusSettings(read_only_endpoints=(bad,))
 
 
-@pytest.mark.parametrize("configured", ["127.0.0.1", "localhost", "127.1", "LocalHost."])
-@pytest.mark.parametrize("sensor_host", ALIASES)
-async def test_every_spelling_of_a_configured_endpoint_is_locked(
-    configured: str, sensor_host: str
-) -> None:
-    assert _locked(sensor_host, (f"{configured}:{PORT}",)) is True
+def test_a_name_in_config_explains_itself() -> None:
+    with pytest.raises(ValueError, match="IP literal"):
+        BusSettings(read_only_endpoints=("localhost:502",))
+
+
+# ── locking by address ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("configured", ["127.0.0.1", "127.1", "0x7f000001", "::ffff:127.0.0.1"])
+@pytest.mark.parametrize("sensor_host", LOOPBACK_SPELLINGS)
+async def test_every_literal_spelling_of_a_configured_ip_is_locked(configured: str, sensor_host: str) -> None:
+    endpoint = f"[{configured}]:{PORT}" if ":" in configured else f"{configured}:{PORT}"
+    assert _bus(sensor_host, (endpoint,)).read_only is True
 
 
 async def test_ipv6_loopback_literal_forms() -> None:
-    assert _locked("::1", (f"[::1]:{PORT}",)) is True
-    assert _locked("[::1]", (f"[::1]:{PORT}",)) is True
-    assert _locked("::1", (f"localhost:{PORT}",)) is True  # localhost also resolves to ::1
+    for host in ("::1", "[::1]", "0:0:0:0:0:0:0:1"):
+        assert _bus(host, (f"[::1]:{PORT}",), PORT).read_only is True
 
 
-async def test_different_port_is_not_locked() -> None:
-    assert _locked("127.0.0.1", (f"127.0.0.1:{PORT + 1}",)) is False
+async def test_different_port_or_address_is_not_locked() -> None:
+    assert _bus("127.0.0.1", (f"127.0.0.1:{PORT + 1}",)).read_only is False
+    assert _bus("192.0.2.1", (f"127.0.0.1:{PORT}",)).read_only is False
+    assert _bus("::1", (f"127.0.0.1:{PORT}",)).read_only is False
 
 
-async def test_unrelated_resolvable_host_is_not_locked() -> None:
-    assert _locked("192.0.2.1", (f"127.0.0.1:{PORT}",)) is False
+@pytest.mark.parametrize("name", ["localhost", "LOCALHOST", "localhost.", "plc.example", "local host", "127.0.0.1."])
+async def test_a_bus_host_that_is_not_a_literal_is_locked_when_an_endpoint_is_configured(name: str) -> None:
+    assert _bus(name, (f"127.0.0.1:{PORT}",)).read_only is True
 
 
-async def test_unresolvable_bus_host_fails_closed_when_endpoints_are_configured() -> None:
-    assert _locked(UNRESOLVABLE, (f"127.0.0.1:{PORT}",)) is True
-    assert _locked("local host", (f"127.0.0.1:{PORT}",)) is True
+async def test_names_keep_working_when_nothing_is_read_only() -> None:
+    assert _bus("localhost", ()).read_only is False
+    assert _bus("plc.example", ()).read_only is False
 
 
-async def test_unresolvable_bus_host_is_not_locked_when_nothing_is_read_only() -> None:
-    assert _locked(UNRESOLVABLE, ()) is False
+async def test_a_name_never_resolves_to_a_different_decision_over_time() -> None:
+    """DNS is irrelevant: the decision for a name is the same whatever it points to."""
+    bus = _bus("plc.example", (f"127.0.0.1:{PORT}",))
+    assert bus.read_only is True
+    with pytest.raises(WriteError):
+        _ = bus.client.write_register
 
 
-async def test_unresolvable_bus_host_fails_closed_when_a_latch_exists() -> None:
-    modbus_bus.lock_bus(f"tcp://127.0.0.1:{PORT}", "test")
-    assert _locked(UNRESOLVABLE, ()) is True
+# ── latch ────────────────────────────────────────────────────────────────────
 
 
-async def test_unresolvable_configured_endpoint_still_locks_its_own_spelling() -> None:
-    assert _locked(UNRESOLVABLE, (f"{UNRESOLVABLE}:{PORT}",)) is True
-
-
-def test_config_accepts_bracketed_ipv6_and_rejects_ambiguous_forms() -> None:
-    assert BusSettings(read_only_endpoints=("[::1]:502",)).read_only_endpoints == ("[::1]:502",)
-    for bad in ("::1:502", "[::1]", "local host:502", "[::1:502", "host:502:3"):
-        with pytest.raises(ValueError):
-            BusSettings(read_only_endpoints=(bad,))
-
-
-def test_configured_addresses_are_resolved_at_configure_time() -> None:
-    s = BusSettings(read_only_endpoints=("localhost:502",))
-    assert ("127.0.0.1", 502) in s.read_only_addresses
-
-
-# ── latch is by address too ──────────────────────────────────────────────────
-
-
-async def test_latch_by_one_spelling_locks_every_other_spelling() -> None:
+async def test_latch_by_a_literal_locks_every_literal_spelling_of_it() -> None:
     modbus_bus.configure(BusSettings())
-    modbus_bus.lock_bus(f"tcp://localhost:{PORT}", "sensor")
-    for host in ALIASES:
+    modbus_bus.lock_bus(f"tcp://127.1:{PORT}", "sensor")
+    for host in LOOPBACK_SPELLINGS:
         bus = BusScheduler(f"tcp://{host}:{PORT}", _client(), BusSettings())
         assert bus.read_only is True, host
         with pytest.raises(WriteError):
             _ = bus.client.write_register
-    other_port = BusScheduler(f"tcp://127.0.0.1:{PORT + 1}", _client(), BusSettings())
-    assert other_port.read_only is False
+    assert BusScheduler(f"tcp://127.0.0.1:{PORT + 1}", _client(), BusSettings()).read_only is False
+
+
+async def test_latch_locks_every_non_literal_host() -> None:
+    modbus_bus.configure(BusSettings())
+    modbus_bus.lock_bus(f"tcp://127.0.0.1:{PORT}", "sensor")
+    assert BusScheduler(f"tcp://localhost:{PORT + 9}", _client(), BusSettings()).read_only is True
+
+
+async def test_latch_by_a_name_locks_all_names_but_not_other_literals() -> None:
+    modbus_bus.configure(BusSettings())
+    modbus_bus.lock_bus(f"tcp://plc.example:{PORT}", "sensor")
+    assert BusScheduler(f"tcp://other.example:{PORT + 1}", _client(), BusSettings()).read_only is True
+    assert BusScheduler(f"tcp://127.0.0.1:{PORT}", _client(), BusSettings()).read_only is False
 
 
 async def test_alias_bus_created_after_release_is_still_locked() -> None:
     modbus_bus.configure(BusSettings())
-    bus = modbus_bus.get_or_create_bus(f"tcp://localhost:{PORT}", _client, read_only=True)
+    bus = modbus_bus.get_or_create_bus(f"tcp://0x7f000001:{PORT}", _client, read_only=True)
     assert bus.read_only
-    await modbus_bus.release_bus(f"tcp://localhost:{PORT}", 1)
+    await modbus_bus.release_bus(f"tcp://0x7f000001:{PORT}", 1)
     fresh = modbus_bus.get_or_create_bus(f"tcp://127.0.0.1:{PORT}", _client)
     assert fresh.read_only is True
     await modbus_bus.release_bus(f"tcp://127.0.0.1:{PORT}", 2)
 
 
-async def test_resolution_is_not_repeated_on_every_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = BusSettings(read_only_endpoints=(f"127.0.0.1:{PORT}",))
-    modbus_bus.configure(settings)
-    bus = BusScheduler(f"tcp://localhost:{PORT}", _client(), settings)
-    calls: list[Any] = []
-    monkeypatch.setattr(modbus_bus, "resolve_addresses", lambda *a: calls.append(a) or None)
-    for _ in range(50):
-        assert bus.read_only is True
-    assert calls == []
+# ── row check derives the key exactly as the driver does ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "protocol,params",
+    [
+        ("MODBUS_TCP", {"host": "127.1", "port": PORT}),
+        ("MODBUS_TCP", {"host": "0x7f000001", "port": PORT, "mode": "rtu"}),  # orchestrator forces tcp
+        ("MODBUS_TCP", {"host": "localhost", "port": PORT}),  # name: fail closed
+        ("MODBUS_TCP", {"host": "[::ffff:127.0.0.1]", "port": PORT}),
+    ],
+)
+async def test_row_refuses_writes_for_every_driver_equivalent_key(protocol: str, params: dict[str, Any]) -> None:
+    modbus_bus.configure(BusSettings(read_only_endpoints=(f"127.0.0.1:{PORT}",)))
+    assert modbus_bus.row_refuses_writes(protocol, params) is not None
+
+
+async def test_row_key_matches_the_driver_key_including_defaults() -> None:
+    from app.drivers.modbus import ModbusDriver
+
+    for params in ({"host": "10.1.2.3", "port": 1502}, {"host": "10.1.2.3"}, {}, {"port": "503"}):
+        config = {**params, "mode": "tcp"}  # what the orchestrator hands the driver
+        driver = ModbusDriver(sensor_id=1, sensor_name="x", config=config)
+        assert modbus_bus.bus_key_for("tcp", params) == driver._bus_spec()[0]
+    config = {"port": "/dev/ttyS1", "mode": "rtu"}
+    assert modbus_bus.bus_key_for("rtu", config) == ModbusDriver(1, "x", config)._bus_spec()[0]
 
 
 # ── client internals are not reachable as plain attributes ───────────────────
 
 
 async def test_wrapped_client_and_ctx_are_not_plain_attributes() -> None:
-    bus = BusScheduler(f"tcp://127.0.0.1:{PORT}", _client(), BusSettings(read_only_endpoints=(f"127.0.0.1:{PORT}",)))
-    guard = bus.client
+    guard = _bus("127.0.0.1", (f"127.0.0.1:{PORT}",)).client
     assert not hasattr(guard, "_client")
     assert not hasattr(guard, "_is_locked")
     assert not hasattr(guard.ctx, "_ctx")
 
 
-async def test_endpoint_that_failed_to_resolve_at_configure_time_still_locks_its_spelling(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """DNS flake at boot: the configured name is matched by spelling once it resolves later."""
-    real = modbus_bus.resolve_addresses
-    monkeypatch.setattr(modbus_bus, "resolve_addresses", lambda *_a: None)
-    settings = BusSettings(read_only_endpoints=(f"localhost:{PORT}",))
-    monkeypatch.setattr(modbus_bus, "resolve_addresses", real)
-    assert settings.read_only_unresolved == (f"localhost:{PORT}",)
-    modbus_bus.configure(settings)
-    assert BusScheduler(f"tcp://LOCALHOST:{PORT}", _client(), settings).read_only is True
+def test_the_feature_has_no_resolution_api_left() -> None:
+    for gone in ("resolve_addresses", "refresh_key_addresses", "_key_addresses"):
+        assert not hasattr(modbus_bus, gone), gone
+    assert not hasattr(BusSettings(), "read_only_unresolved")
+
+
+async def test_driver_write_refusal_and_row_check_never_resolve_names() -> None:
+    """Whole decision path under the no-DNS fixture (it fails the test on any lookup)."""
+    from app.drivers.modbus import ModbusDriver
+
+    modbus_bus.configure(BusSettings(read_only_endpoints=(f"127.0.0.1:{PORT}",)))
+    for host in ("localhost", "127.1", "plc.example", "::ffff:127.0.0.1"):
+        driver = ModbusDriver(
+            sensor_id=1, sensor_name="x",
+            config={"mode": "tcp", "host": host, "port": PORT, "register_type": "holding"},
+        )
+        driver._client = MagicMock()
+        with pytest.raises(WriteError):
+            await driver.write(1.0)
+        assert modbus_bus.row_refuses_writes("MODBUS_TCP", {"host": host, "port": PORT}) is not None
