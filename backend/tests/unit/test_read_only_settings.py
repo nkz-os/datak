@@ -101,4 +101,4 @@ def test_startup_logs_the_effective_resolved_list(caplog: pytest.LogCaptureFixtu
     caplog.set_level("INFO")
     built = BusSettings(read_only_endpoints=("127.1:502",))
     describe_read_only(built)
-    assert "127.0.0.1:502" in caplog.text
+    assert '"addresses": ["127.0.0.1:502"]' in caplog.text
