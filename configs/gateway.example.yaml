@@ -123,7 +123,11 @@ modbus:
                                # stops the gateway at startup. DaTaK can never write to
                                # these Modbus-TCP endpoints. Matched by canonical address
                                # (127.1, 0x7f000001 and 127.0.0.1 are the same endpoint);
-                               # no DNS is ever used for this.
+                               # no DNS is ever used for this. IPv6 scope ids (%eth0) are
+                               # ignored. Only IPv4-mapped IPv6 (::ffff:a.b.c.d) is folded
+                               # to IPv4; NAT64, 6to4 and IPv4-compatible IPv6 forms are
+                               # NOT: list the IPv4 literal (and any such IPv6 form a
+                               # sensor might use).
                                # WHILE ANY EXISTS, Modbus TCP devices configured by host
                                # NAME cannot be written (they are polled normally): use
                                # the IP address in the sensor to keep it writable.

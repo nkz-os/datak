@@ -180,11 +180,73 @@ async def test_latch_locks_every_non_literal_host() -> None:
     assert BusScheduler(f"tcp://localhost:{PORT + 9}", _client(), BusSettings()).read_only is True
 
 
-async def test_latch_by_a_name_locks_all_names_but_not_other_literals() -> None:
+async def test_latch_by_a_name_locks_every_tcp_bus_literals_included() -> None:
+    """We cannot know which address the name means: fail closed for all TCP buses."""
     modbus_bus.configure(BusSettings())
-    modbus_bus.lock_bus(f"tcp://plc.example:{PORT}", "sensor")
+    modbus_bus.lock_bus(f"tcp://ncu.local:{PORT}", "sensor")
     assert BusScheduler(f"tcp://other.example:{PORT + 1}", _client(), BusSettings()).read_only is True
-    assert BusScheduler(f"tcp://127.0.0.1:{PORT}", _client(), BusSettings()).read_only is False
+    bus = BusScheduler(f"tcp://10.1.2.3:{PORT}", _client(), BusSettings())
+    assert bus.read_only is True
+    with pytest.raises(WriteError):
+        _ = bus.client.write_register
+
+
+async def test_latch_by_a_literal_does_not_lock_unrelated_literals() -> None:
+    modbus_bus.configure(BusSettings())
+    modbus_bus.lock_bus(f"tcp://127.0.0.1:{PORT}", "sensor")
+    assert BusScheduler(f"tcp://10.1.2.3:{PORT}", _client(), BusSettings()).read_only is False
+
+
+async def test_rtu_bus_is_not_touched_by_a_name_latch() -> None:
+    modbus_bus.configure(BusSettings())
+    modbus_bus.lock_bus(f"tcp://ncu.local:{PORT}", "sensor")
+    assert BusScheduler("rtu:///dev/ttyS9", _client(), BusSettings()).read_only is False
+
+
+async def test_flagged_sensor_on_a_name_locks_an_unflagged_sensor_on_an_ip() -> None:
+    from app.drivers.modbus import ModbusDriver
+
+    modbus_bus.configure(BusSettings())
+    flagged = ModbusDriver(
+        sensor_id=1, sensor_name="a",
+        config={"mode": "tcp", "host": "ncu.local", "port": PORT, "read_only": True},
+    )
+    plain = ModbusDriver(
+        sensor_id=2, sensor_name="b", config={"mode": "tcp", "host": "10.1.2.3", "port": PORT},
+    )
+    await flagged.connect()
+    await plain.connect()
+    try:
+        plain._client.write_register = MagicMock()  # type: ignore[union-attr]
+        with pytest.raises(WriteError):
+            await plain.write(1.0)
+    finally:
+        await plain.disconnect()
+        await flagged.disconnect()
+
+
+# ── IPv6 scope ids are not part of the address ───────────────────────────────
+
+
+@pytest.mark.parametrize("host", ["fe80::1%lo", "fe80::1%eth0", "fe80::1%1", "[fe80::1%lo]", "FE80::1"])
+def test_scope_id_is_dropped(host: str) -> None:
+    assert literal_address(host) == "fe80::1"
+
+
+@pytest.mark.parametrize("host", ["fe80::1%", "fe80::1%a b", "127.0.0.1%lo", "%lo"])
+def test_malformed_scope_is_not_a_literal(host: str) -> None:
+    assert literal_address(host) is None
+
+
+async def test_config_scope_ids_and_keys_agree_both_directions() -> None:
+    s = BusSettings(read_only_endpoints=("[fe80::1%lo]:502",))
+    assert s.read_only_addresses == {("fe80::1", 502)}
+    for host in ("fe80::1", "fe80::1%eth0", "fe80::1%1", "[fe80::1%lo]"):
+        modbus_bus.configure(s)
+        assert BusScheduler(f"tcp://{host}:502", _client(), s).read_only is True, host
+    s2 = BusSettings(read_only_endpoints=("[fe80::1]:502",))
+    modbus_bus.configure(s2)
+    assert BusScheduler("tcp://fe80::1%eth0:502", _client(), s2).read_only is True
 
 
 async def test_alias_bus_created_after_release_is_still_locked() -> None:

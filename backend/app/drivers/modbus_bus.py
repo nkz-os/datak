@@ -122,7 +122,12 @@ def literal_address(host: str) -> str | None:
         return None
     try:
         if ":" in text:
-            ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.IPv6Address(text)
+            # A scope id (%eth0, %1) is not part of the address: drop it, but an
+            # empty one is malformed.
+            base, pct, zone = text.partition("%")
+            if pct and not zone:
+                return None
+            ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.IPv6Address(base)
             if ip.ipv4_mapped is not None:
                 ip = ip.ipv4_mapped
             return str(ip)
@@ -537,6 +542,9 @@ class ReadGuardedClient:
 # whatever happens to the bus object.
 _read_only_latch: set[str] = set()
 _latched_addresses: set[tuple[str, int]] = set()
+# A flagged sensor whose host is a NAME: we cannot know which address it means,
+# so every TCP bus is locked.
+_all_tcp_latched = False
 
 
 def lock_bus(key: str, reason: str) -> None:
@@ -546,9 +554,12 @@ def lock_bus(key: str, reason: str) -> None:
     every non-literal host is locked (see ``bus_is_locked``). Cannot be undone
     short of a restart.
     """
+    global _all_tcp_latched
     address = key_address(key)
     if address is not None:
         _latched_addresses.add(address)
+    elif key.startswith("tcp://"):
+        _all_tcp_latched = True
     if key not in _read_only_latch:
         _read_only_latch.add(key)
         logger.info(
@@ -561,8 +572,10 @@ def lock_bus(key: str, reason: str) -> None:
 
 def _reset_read_only_latch() -> None:
     """Test helper: forget all latched keys/addresses."""
+    global _all_tcp_latched
     _read_only_latch.clear()
     _latched_addresses.clear()
+    _all_tcp_latched = False
 
 
 def bus_is_locked(key: str, settings: BusSettings | None = None) -> bool:
@@ -576,6 +589,8 @@ def bus_is_locked(key: str, settings: BusSettings | None = None) -> bool:
         return True
     if not key.startswith("tcp://"):
         return False
+    if _all_tcp_latched:
+        return True
     configs = [_settings] if settings is None else [_settings, settings]
     if not (_read_only_latch or any(c.read_only_endpoints for c in configs)):
         return False
