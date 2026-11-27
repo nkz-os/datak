@@ -128,3 +128,12 @@ async def test_read_issues_bounded_transactions_and_returns_every_value() -> Non
 def test_scheduler_budget_counts_the_extra_transactions() -> None:
     driver = _driver(_regs(300))
     assert driver.worst_case_s > modbus_bus.BusSettings().default_transaction_timeout_s
+
+
+def test_gap_is_measured_from_the_furthest_end_of_overlapping_registers() -> None:
+    regs = [
+        {"id": 1, "name": "a", "address": 0, "count": 4, "register_type": "holding"},
+        {"id": 2, "name": "b", "address": 1, "count": 1, "register_type": "holding"},  # inside a
+        {"id": 3, "name": "c", "address": 20, "count": 1, "register_type": "holding"},  # gap 16 from a's end
+    ]
+    assert _spans(_driver(regs)) == [("holding", 0, 21)]

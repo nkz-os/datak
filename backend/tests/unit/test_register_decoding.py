@@ -269,3 +269,8 @@ async def test_overlapping_registers_over_the_same_words_read_enough_words() -> 
     assert math.degrees(readings[1]) == pytest.approx(-34.5, abs=1e-3)
     kwargs = driver._client.read_holding_registers.await_args.kwargs
     assert kwargs["count"] == 2
+
+
+def test_bit_field_does_not_include_bits_above_its_length() -> None:
+    assert _dec([0xFFFF], "uint16", count=1, bit_offset=0, bit_length=8) == 255.0
+    assert _dec([0xFFFF], "uint16", count=1, bit_offset=4, bit_length=4) == 15.0
