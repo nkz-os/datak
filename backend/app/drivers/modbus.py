@@ -39,7 +39,7 @@ from app.drivers.modbus_bus import (
     SensorHealth,
     read_only_requested,
 )
-from app.drivers.register_decode import decode_words
+from app.drivers.register_decode import NonFiniteValueError, decode_words
 
 # Sentinel to group contiguous registers for batch reading
 _MAX_GAP = 16  # max gap between registers to batch them together
@@ -93,6 +93,7 @@ class ModbusDriver(BaseDriver):
         # Fails towards read-only (see modbus_bus.read_only_requested).
         self._sensor_read_only = read_only_requested(config)
         self._refusal_logged = False
+        self._nonfinite_warned: set[str] = set()  # register names currently non-finite
 
         # Multi-register support
         self._registers: list[dict[str, Any]] = registers or []
@@ -432,12 +433,26 @@ class ModbusDriver(BaseDriver):
                                 bit_length=reg.get("bit_length"),
                                 count=cnt,
                             )
+                        except NonFiniteValueError:
+                            # Drop only this register for this poll; the rest of the
+                            # block is still delivered and the sensor stays healthy.
+                            rname = str(reg.get("name", f"reg_{reg['address']}"))
+                            if rname not in self._nonfinite_warned:
+                                self._nonfinite_warned.add(rname)
+                                self._log.warning(
+                                    "Non-finite value dropped",
+                                    sensor_id=self.sensor_id,
+                                    register=rname,
+                                    address=reg["address"],
+                                )
+                            continue
                         except ValueError as e:
                             raise ReadError(
                                 f"Cannot decode register '{reg.get('name')}' "
                                 f"at {reg_type} {reg['address']}: {e}"
                             ) from e
 
+                    self._nonfinite_warned.discard(str(reg.get("name", f"reg_{reg['address']}")))
                     results.append({
                         "register_id": reg["id"],
                         "name": reg.get("name", f"reg_{reg['address']}"),

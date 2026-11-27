@@ -228,7 +228,8 @@ async def test_endpoint_matching_normalises_case_space_and_port() -> None:
 
 
 async def test_other_endpoint_is_not_locked() -> None:
-    bus = _bus(endpoints=("other.example:502",))
+    # (resolvable hosts: an unresolvable bus host fails closed, see test_read_only_addresses)
+    bus = _bus(key="tcp://127.0.0.1:503", endpoints=("127.0.0.1:502",))
     assert bus.read_only is False
 
 

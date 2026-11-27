@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
-from app.drivers.modbus_bus import read_only_requested
+from app.drivers.modbus_bus import row_refuses_writes
 from app.models.sensor import Sensor
 from app.services.automation import AutomationRule, automation_engine
 from app.services.orchestrator import orchestrator
@@ -55,7 +55,7 @@ async def create_rule(rule: RuleCreate, _user: CurrentUser, db: DbSession) -> Ru
     row = await db.execute(select(Sensor).where(Sensor.id == rule.target_sensor_id))
     target = row.scalar_one_or_none()
     if orchestrator.is_read_only(rule.target_sensor_id) or (
-        target is not None and read_only_requested(target.connection_params)
+        target is not None and row_refuses_writes(target.protocol, target.connection_params)
     ):
         raise HTTPException(
             status_code=409,

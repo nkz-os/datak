@@ -220,3 +220,50 @@ async def test_sanity_unlocked_bus_client_does_write(
     finally:
         await driver.stop()
     assert 6 in gw.function_codes
+
+
+@pytest.mark.parametrize("alias", ["localhost", "LOCALHOST", "127.1", "2130706433", "0x7f000001"])
+async def test_alias_of_a_configured_endpoint_never_puts_a_write_on_the_wire(
+    gateway: tuple[RecordingGateway, int], alias: str
+) -> None:
+    gw, port = gateway
+    modbus_bus.configure(
+        BusSettings(
+            round_budget_s=0.5, default_transaction_timeout_s=0.1, quarantine_max_s=1.0,
+            read_only_endpoints=(f"127.0.0.1:{port}",),
+        )
+    )
+    driver = _driver(1, port, host=alias)
+    await driver.start()
+    bus = modbus_bus.get_bus(f"tcp://{alias}:{port}")
+    assert bus is not None
+    try:
+        await asyncio.sleep(0.4)
+        with pytest.raises(WriteError):
+            await driver.write(7.0)
+        async with bus.exclusive(0.2) as client:
+            with pytest.raises(WriteError):
+                await client.write_register(address=0, value=1, device_id=1)
+    finally:
+        await driver.stop()
+    assert 3 in gw.function_codes
+    assert gw.writes == []
+
+
+async def test_alias_of_a_flagged_sensor_endpoint_is_locked_on_its_own_bus(
+    gateway: tuple[RecordingGateway, int],
+) -> None:
+    """Flagged via 127.0.0.1; a plain sensor reaching the same device as 'localhost' cannot write."""
+    gw, port = gateway
+    ro = _driver(1, port, read_only=True)
+    await ro.start()
+    alias = _driver(2, port, host="localhost")
+    await alias.start()
+    try:
+        await asyncio.sleep(0.4)
+        with pytest.raises(WriteError):
+            await alias.write(7.0)
+    finally:
+        await alias.stop()
+        await ro.stop()
+    assert gw.writes == []

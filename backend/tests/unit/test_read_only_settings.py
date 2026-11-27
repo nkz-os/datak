@@ -61,3 +61,38 @@ def test_startup_refuses_a_malformed_endpoint() -> None:
 
     with pytest.raises(ValueError):
         build_bus_settings(Settings(modbus_read_only_endpoints=["plc.example"]))
+
+
+@pytest.mark.parametrize(
+    "key", ["read_only_endpoint", "readonly_endpoints", "read_only_endpoints_", "Read_Only_Endpoints", "round_budget"]
+)
+def test_misspelt_modbus_key_fails_startup(tmp_path: Path, key: str) -> None:
+    path = _write(tmp_path, f"modbus:\n  {key}:\n    - plc.example:502\n")
+    with pytest.raises(ValueError, match=key):
+        Settings.from_yaml(path)
+
+
+@pytest.mark.parametrize("value", ["~", "null", '""', "plc.example:502", "5", "{a: 1}"])
+def test_read_only_endpoints_must_be_an_explicit_list(tmp_path: Path, value: str) -> None:
+    path = _write(tmp_path, f"modbus:\n  read_only_endpoints: {value}\n")
+    with pytest.raises(ValueError, match="read_only_endpoints"):
+        Settings.from_yaml(path)
+
+
+def test_known_modbus_keys_and_absent_key_are_fine(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "modbus:\n  round_budget_ms: 1000\n  transaction_timeout_ms: 250\n"
+        "  quarantine_max_s: 60\n  gateway_settle_ms: 0\n",
+    )
+    assert Settings.from_yaml(path).modbus_read_only_endpoints == []
+
+
+def test_startup_logs_the_effective_resolved_list(caplog: pytest.LogCaptureFixture) -> None:
+    from app.main import describe_read_only
+
+    caplog.set_level("INFO")
+    built = BusSettings(read_only_endpoints=("localhost:502",))
+    describe_read_only(built)
+    assert "127.0.0.1:502" in caplog.text
+    assert "localhost:502" in caplog.text

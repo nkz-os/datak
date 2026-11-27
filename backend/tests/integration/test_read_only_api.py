@@ -70,8 +70,8 @@ async def test_write_to_sensor_on_configured_read_only_endpoint_answers_409(
 
 async def test_write_to_other_sensor_is_not_a_409(async_client: AsyncClient, test_user: Any) -> None:
     """A writable sensor on another bus still reaches the write path (500: gateway unreachable)."""
-    await _create(async_client, test_user, _sensor("ro", "ro.example", read_only=True))
-    sid = await _create(async_client, test_user, _sensor("rw", "rw.example"))
+    await _create(async_client, test_user, _sensor("ro", "127.0.0.1", read_only=True, port=1502))
+    sid = await _create(async_client, test_user, _sensor("rw", "127.0.0.1", port=1503))
     response = await async_client.post(
         f"/api/sensors/{sid}/write", json={"value": 1.0}, headers=_auth(test_user)
     )
@@ -139,3 +139,31 @@ async def test_rule_targeting_writable_sensor_is_accepted(
         headers=_auth(test_user),
     )
     assert response.status_code == 200
+
+
+async def test_write_to_flagged_sensor_is_409_even_when_its_driver_is_not_running(
+    async_client: AsyncClient, test_user: Any
+) -> None:
+    sid = await _create(async_client, test_user, _sensor("ro-off", "127.0.0.1", read_only=True))
+    await orchestrator.remove_sensor(sid)
+    modbus_bus._reset_read_only_latch()  # nothing in memory: only the stored row knows
+    response = await async_client.post(
+        f"/api/sensors/{sid}/write", json={"value": 1.0}, headers=_auth(test_user)
+    )
+    assert response.status_code == 409
+
+
+async def test_write_to_sensor_on_configured_endpoint_is_409_even_when_driver_is_not_running(
+    async_client: AsyncClient, test_user: Any
+) -> None:
+    previous = modbus_bus.current_settings()
+    modbus_bus.configure(modbus_bus.BusSettings(read_only_endpoints=("localhost:502",)))
+    try:
+        sid = await _create(async_client, test_user, _sensor("cfg-off", "127.0.0.1"))
+        await orchestrator.remove_sensor(sid)
+        response = await async_client.post(
+            f"/api/sensors/{sid}/write", json={"value": 1.0}, headers=_auth(test_user)
+        )
+        assert response.status_code == 409
+    finally:
+        modbus_bus.configure(previous)

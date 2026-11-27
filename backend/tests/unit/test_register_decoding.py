@@ -274,3 +274,53 @@ async def test_overlapping_registers_over_the_same_words_read_enough_words() -> 
 def test_bit_field_does_not_include_bits_above_its_length() -> None:
     assert _dec([0xFFFF], "uint16", count=1, bit_offset=0, bit_length=8) == 255.0
     assert _dec([0xFFFF], "uint16", count=1, bit_offset=4, bit_length=4) == 15.0
+
+
+# ── non-finite float32: drop only that register for this poll ────────────────
+
+NAN_WORDS = [0x7FC0, 0x0000]
+
+
+def _nan_driver() -> ModbusDriver:
+    return _driver([
+        _reg(1, 0, 2, name="bad", data_type="float32"),
+        _reg(2, 2, 1, name="good", data_type="uint16"),
+    ])
+
+
+async def test_nan_register_is_dropped_and_the_rest_of_the_block_is_delivered() -> None:
+    driver = _nan_driver()
+    driver._client = MagicMock()
+    driver._client.read_holding_registers = AsyncMock(return_value=_block([*NAN_WORDS, 42]))
+    readings = await driver.read_registers()
+    assert [(r["register_id"], r["raw_value"]) for r in readings] == [(2, 42.0)]
+
+
+async def test_nan_warning_once_per_register_until_a_finite_value_returns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING")
+    driver = _nan_driver()
+    driver._client = MagicMock()
+    read = driver._client.read_holding_registers = AsyncMock()
+    read.return_value = _block([*NAN_WORDS, 1])
+    for _ in range(3):
+        await driver.read_registers()
+    assert caplog.text.count("Non-finite") == 1
+    read.return_value = _block([0x3FC0, 0, 1])  # 1.5: finite again
+    assert len(await driver.read_registers()) == 2
+    read.return_value = _block([*NAN_WORDS, 1])
+    await driver.read_registers()
+    assert caplog.text.count("Non-finite") == 2
+
+
+async def test_sensor_is_not_marked_failing_for_a_nan_register() -> None:
+    from app.drivers.modbus_bus import SensorHealth
+
+    driver = _nan_driver()
+    driver._client = MagicMock()
+    driver._client.read_holding_registers = AsyncMock(return_value=_block([*NAN_WORDS, 1]))
+    readings = await driver.read_registers()  # returns, does not raise
+    assert readings
+    await driver.report(SensorHealth.ONLINE, None, bus_ok=True)
+    assert driver.error_count == 0

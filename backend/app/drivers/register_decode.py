@@ -19,6 +19,10 @@ WORD_ORDERS = ("high_first", "low_first")
 _WORD_TYPES = ("holding", "input")
 
 
+class NonFiniteValueError(ValueError):
+    """A float32 decoded to NaN or infinity."""
+
+
 def validate_decoding(
     *,
     data_type: str | None,
@@ -112,5 +116,5 @@ def decode_words(
         return float(struct.unpack(">i", raw)[0])
     value = float(struct.unpack(">f", raw)[0])
     if not math.isfinite(value):
-        raise ValueError("float32 value is not finite (NaN/inf)")
+        raise NonFiniteValueError("float32 value is not finite (NaN/inf)")
     return value

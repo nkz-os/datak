@@ -119,3 +119,14 @@ async def test_init_db_upgrades_an_old_database_and_orm_reads_it(
             assert row.name == "temp" and row.data_type is None and row.word_order is None
     finally:
         await engine.dispose()
+
+
+async def test_non_sqlite_url_logs_a_warning_and_skips(caplog: pytest.LogCaptureFixture) -> None:
+    from unittest.mock import MagicMock
+
+    conn = MagicMock()
+    conn.dialect.name = "postgresql"
+    caplog.set_level("WARNING")
+    assert add_missing_register_columns(conn) == []
+    conn.execute.assert_not_called()
+    assert "skipped" in caplog.text

@@ -24,11 +24,16 @@ REGISTER_DECODING_COLUMNS: dict[str, str] = {
 def add_missing_register_columns(conn: Connection) -> list[str]:
     """Add the register decoding columns to ``sensor_registers`` if absent (SQLite).
 
-    Returns the names of the columns added. A missing table is left alone:
+    Returns the names of the columns added (none, with a warning, on other databases). A missing table is left alone:
     ``create_all`` creates it with the columns.
     """
     if conn.dialect.name != "sqlite":
-        raise RuntimeError(f"schema upgrade supports SQLite only, got {conn.dialect.name}")
+        # Startup must not fail where it worked before; the columns must then be added by hand.
+        logger.warning(
+            "Schema upgrade skipped: only SQLite is supported",
+            dialect=conn.dialect.name,
+        )
+        return []
     existing = {row[1] for row in conn.execute(text("PRAGMA table_info(sensor_registers)"))}
     if not existing:
         return []

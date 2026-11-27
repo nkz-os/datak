@@ -86,6 +86,21 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
+def describe_read_only(bus_settings: BusSettings) -> None:
+    """Log the effective read-only endpoints and what they resolved to."""
+    logger.info(
+        "Modbus read-only endpoints",
+        endpoints=list(bus_settings.read_only_endpoints),
+        resolved=sorted(f"{ip}:{port}" for ip, port in bus_settings.read_only_addresses),
+        unresolved=list(bus_settings.read_only_unresolved),
+    )
+    for endpoint in bus_settings.read_only_unresolved:
+        logger.warning(
+            "Read-only endpoint does not resolve; matched by spelling, unresolvable hosts are locked",
+            endpoint=endpoint,
+        )
+
+
 async def load_active_sensors(session_factory: Any) -> int:
     """Start a driver for every active sensor stored in the database.
 
@@ -151,7 +166,9 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("InfluxDB not available, running in buffer mode")
 
     # Modbus bus timing contract: must be set before any sensor is added.
-    modbus_bus.configure(build_bus_settings(settings))
+    bus_settings = build_bus_settings(settings)
+    modbus_bus.configure(bus_settings)
+    describe_read_only(bus_settings)
     logger.info(
         "Modbus bus settings",
         round_budget_ms=settings.modbus_round_budget_ms,

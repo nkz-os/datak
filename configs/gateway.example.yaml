@@ -118,9 +118,17 @@ modbus:
                                # (per sensor: connection_params.transaction_timeout_ms)
   quarantine_max_s: 60         # max backoff between probes of a dead slave
   gateway_settle_ms: 0         # pause after a failed transaction (see note)
-  read_only_endpoints: []      # "host:port" list. DaTaK can never write to these
-                               # Modbus-TCP endpoints (also per sensor:
-                               # connection_params.read_only: true)
+  read_only_endpoints: []      # explicit list (or leave the key out; "~" is rejected).
+                               # "host:port" or "[ipv6]:port". DaTaK can never write to
+                               # these Modbus-TCP endpoints. Matched by RESOLVED ADDRESS,
+                               # so "localhost" and "127.0.0.1" are the same endpoint; a
+                               # host that cannot be resolved is treated as locked
+                               # whenever any endpoint is read-only.
+                               # An endpoint that must NEVER be written belongs HERE.
+                               # The per-sensor connection_params.read_only flag is NOT
+                               # durable: an operator can clear it through the API, and
+                               # after a restart an unflagged row is writable.
+                               # Unknown keys under "modbus" stop the gateway at startup.
 # NOTE: a Modbus-TCP->RTU gateway (e.g. EBYTE) has its own serial response
 # timeout. Preferably set it SHORTER than transaction_timeout_ms. If it cannot
 # be changed, set gateway_settle_ms >= gateway timeout - transaction_timeout_ms,

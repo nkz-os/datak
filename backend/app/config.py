@@ -30,6 +30,15 @@ class DeviceRoute(BaseModel):
     windowSeconds: int | None = Field(default=None, ge=60, le=86400)  # noqa: N815
 
 
+MODBUS_KEYS = (
+    "round_budget_ms",
+    "transaction_timeout_ms",
+    "quarantine_max_s",
+    "gateway_settle_ms",
+    "read_only_endpoints",
+)
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment and config file."""
 
@@ -131,6 +140,8 @@ class Settings(BaseSettings):
         with open(config_path) as f:
             config = yaml.safe_load(f) or {}
 
+        cls._validate_modbus_section(config.get("modbus"))
+
         # Flatten nested config to match env var style
         flat_config: dict[str, Any] = {}
 
@@ -149,6 +160,26 @@ class Settings(BaseSettings):
         settings = cls(**clean_config)
         settings._validate_runtime_secrets()
         return settings
+
+    @classmethod
+    def _validate_modbus_section(cls, modbus: Any) -> None:
+        """A misspelt key would silently drop the read-only protection: fail startup."""
+        if modbus is None:
+            return
+        if not isinstance(modbus, dict):
+            raise ValueError("config 'modbus' must be a mapping")
+        unknown = sorted(str(k) for k in modbus if k not in MODBUS_KEYS)
+        if unknown:
+            raise ValueError(
+                f"unknown key(s) under 'modbus': {', '.join(unknown)} "
+                f"(allowed: {', '.join(MODBUS_KEYS)})"
+            )
+        if "read_only_endpoints" in modbus and not isinstance(modbus["read_only_endpoints"], list):
+            raise ValueError(
+                "modbus.read_only_endpoints must be an explicit list "
+                "(use [] for none, or leave the key out), got "
+                f"{modbus['read_only_endpoints']!r}"
+            )
 
     def _validate_runtime_secrets(self) -> None:
         if self.digital_twin_enabled and not self.digital_twin_password:

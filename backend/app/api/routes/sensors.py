@@ -10,6 +10,7 @@ from sqlalchemy import select
 from app.api.deps import CurrentUser, DbSession, OperatorUser
 from app.core.formula import validate_formula
 from app.drivers.base import ReadOnlyEndpointError
+from app.drivers.modbus_bus import row_refuses_writes
 from app.drivers.register_decode import validate_decoding
 from app.models.audit import AuditAction, AuditLog
 from app.models.sensor import Sensor, SensorProtocol, SensorRegister, SensorStatus
@@ -489,12 +490,21 @@ async def write_to_sensor(
     sensor_id: int,
     body: SensorWriteRequest,
     _user: OperatorUser,
+    db: DbSession,
 ) -> dict[str, str]:
     """
     Write a value to a sensor (actuator).
 
     Requires OPERATOR or ADMIN role.
     """
+    # The stored row decides first: a read-only sensor/endpoint answers 409 even
+    # when its driver is not running.
+    row = await db.execute(select(Sensor).where(Sensor.id == sensor_id))
+    stored = row.scalar_one_or_none()
+    if stored is not None:
+        refusal = row_refuses_writes(stored.protocol, stored.connection_params)
+        if refusal is not None:
+            raise HTTPException(status_code=409, detail=f"Write refused: {refusal}")
     try:
         success = await orchestrator.write_sensor(sensor_id, body.value)
         if success:
