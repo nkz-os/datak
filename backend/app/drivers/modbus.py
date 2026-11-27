@@ -43,6 +43,9 @@ from app.drivers.register_decode import decode_words
 
 # Sentinel to group contiguous registers for batch reading
 _MAX_GAP = 16  # max gap between registers to batch them together
+# Modbus protocol limits for ONE read transaction (FC1/2: bits, FC3/4: registers)
+_MAX_REGISTERS_PER_READ = 125
+_MAX_BITS_PER_READ = 2000
 
 # Serial line settings each open RTU bus was created with (port -> settings).
 _SERIAL_LINE_SETTINGS: dict[str, tuple[int, str, int, int]] = {}
@@ -348,14 +351,24 @@ class ModbusDriver(BaseDriver):
             blocks: list[list[dict[str, Any]]] = []
             current_block: list[dict[str, Any]] = []
             prev_end = -999
+            limit = (
+                _MAX_BITS_PER_READ if reg_type in ("coil", "discrete") else _MAX_REGISTERS_PER_READ
+            )
             for reg in regs_sorted:
                 addr = reg["address"]
                 cnt = reg.get("count", 1)
-                if current_block and (addr - prev_end) > _MAX_GAP:
+                reg_end = addr + cnt
+                if current_block and (
+                    (addr - prev_end) > _MAX_GAP
+                    # never plan a transaction above the protocol limit; a register
+                    # is never cut, it starts the next block
+                    or (max(prev_end, reg_end) - current_block[0]["address"]) > limit
+                ):
                     blocks.append(current_block)
                     current_block = []
                 current_block.append(reg)
-                prev_end = addr + cnt
+                # furthest end seen: registers may overlap (a word decoded two ways)
+                prev_end = reg_end if len(current_block) == 1 else max(prev_end, reg_end)
             if current_block:
                 blocks.append(current_block)
             plan.append((reg_type, blocks))
