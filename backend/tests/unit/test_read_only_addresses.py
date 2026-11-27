@@ -83,7 +83,7 @@ def test_ipv6_literals_canonicalise(host: str, expected: str) -> None:
 @pytest.mark.parametrize(
     "host",
     ["localhost", "LOCALHOST", "localhost.", "plc.example", "127.0.0.1.", "local host", "127.0.0.1 x",
-     "", " ", "256.1.1.1", "1.2.3.4.5", "::1::2", "[::1", "127.0.0.1\n", "fe80::1%eth0x y"],
+     "", " ", "10.0.0.256", "10.0.0.1.5", "::1::2", "[::1", "127.0.0.1\n", "fe80::1%eth0x y"],
 )
 def test_non_literals_are_none(host: str) -> None:
     assert literal_address(host) is None
