@@ -166,3 +166,16 @@ async def test_wrapped_client_and_ctx_are_not_plain_attributes() -> None:
     assert not hasattr(guard, "_client")
     assert not hasattr(guard, "_is_locked")
     assert not hasattr(guard.ctx, "_ctx")
+
+
+async def test_endpoint_that_failed_to_resolve_at_configure_time_still_locks_its_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DNS flake at boot: the configured name is matched by spelling once it resolves later."""
+    real = modbus_bus.resolve_addresses
+    monkeypatch.setattr(modbus_bus, "resolve_addresses", lambda *_a: None)
+    settings = BusSettings(read_only_endpoints=(f"localhost:{PORT}",))
+    monkeypatch.setattr(modbus_bus, "resolve_addresses", real)
+    assert settings.read_only_unresolved == (f"localhost:{PORT}",)
+    modbus_bus.configure(settings)
+    assert BusScheduler(f"tcp://LOCALHOST:{PORT}", _client(), settings).read_only is True
